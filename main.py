@@ -98,8 +98,9 @@ async def run_realtime_conversation(audio: pyaudio.PyAudio, agent_instructions: 
         while True:
             async for response in ws:
                 res_1=json.loads(response)
+                log.info(f"Received event: {res_1.get('type')}")
 
-                if res_1.get("type") == "response.audio.delta":
+                if res_1.get("type") == "response.output_audio.delta":
                     base64_audio_data = res_1.get("delta")
                     if base64_audio_data:
                         pcm_data = base64.b64decode(base64_audio_data)
@@ -134,28 +135,47 @@ async def run_realtime_conversation(audio: pyaudio.PyAudio, agent_instructions: 
 
 async def _connect_realtime(agent_instructions: str):
     additional_headers = {
-        "Authorization": f"Bearer {settings.openai_api_key}",
-        "OpenAI-Beta": "realtime=v1"
+        "Authorization": f"Bearer {settings.openai_api_key}"
     }
-    ws = await websockets.connect("wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview", additional_headers=additional_headers)
+    ws = await websockets.connect(
+        "wss://api.openai.com/v1/realtime?model=gpt-realtime",
+        additional_headers=additional_headers,
+        ping_interval=30,
+        ping_timeout=10,
+        close_timeout=5
+    )
     event = {
         "type": "session.update",
         "session": {
-            "modalities": ['audio', 'text'],
+            "model": "gpt-realtime",
+            "type": "realtime",
+            "audio": {
+                "input" : {
+                    "format": {
+                        "type": "audio/pcm",
+                        "rate": 24000
+                    },
+                    "noise_reduction" : {
+                        "type": "far_field"
+                    },
+                    "turn_detection": {
+                        "create_response": True,
+                        "interrupt_response": True,
+                        "eagerness": "auto",
+                        "type": "semantic_vad"
+                    }
+                },
+                "output": {
+                    "format": {
+                        "type": "audio/pcm",
+                        "rate": 24000
+                    },
+                    "speed": 1,
+                    "voice": settings.agent_voice
+                }
+            },
             "instructions": agent_instructions,
-            "voice": settings.agent_voice,
-            "input_audio_format": "pcm16",
-            "output_audio_format": "pcm16",
-            "input_audio_transcription": {
-                # "enabled": True,
-                "model": "whisper-1"
-            },
-            "turn_detection": {
-                "type": "server_vad",
-                "threshold": 0.1,
-                "prefix_padding_ms": 10,
-                "silence_duration_ms": 999
-            },
+            "output_modalities": ['audio'],
             "tools": [
                 {
                     "name": "go_to_sleep",
@@ -183,7 +203,7 @@ async def _send_audio_loop(ws: websockets.ClientConnection, frame_queue: asyncio
                 "type": "input_audio_buffer.append",
                 "audio": base64.b64encode(frame).decode('utf-8')
             }
-            await ws.send(json.dumps(audio_event))         
+            await ws.send(json.dumps(audio_event))       
 
 def _make_audio_callback(loop, frame_queue: asyncio.Queue):
     def _callback(in_data, frame_count, time_info, status_flags):
