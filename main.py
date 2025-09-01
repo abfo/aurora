@@ -9,10 +9,14 @@ import pvporcupine
 import pyaudio
 import asyncio
 import websockets
+from tools.base import load_plugins, Tool
 
 def main():
     configure_logging(settings.log_level, settings.log_file)
     log = logging.getLogger("aurora")
+
+    # load tool plugins
+    tools = load_plugins(log=log)
 
     agent_instructions = "You are a helpful assistant."
     if settings.agent_instructions_path:
@@ -63,7 +67,7 @@ def main():
                 if porcupine:
                     porcupine.delete()
                 log.info("Wake word detected")
-                asyncio.run(run_realtime_conversation(audio, agent_instructions, log))
+                asyncio.run(run_realtime_conversation(audio, agent_instructions, log, tools))
 
             except Exception as e:
                 log.exception(f"Error in main loop: {e}")
@@ -76,11 +80,11 @@ def main():
         if audio:
             audio.terminate()
 
-async def run_realtime_conversation(audio: pyaudio.PyAudio, agent_instructions: str, log: logging.Logger):
+async def run_realtime_conversation(audio: pyaudio.PyAudio, agent_instructions: str, log: logging.Logger, tools: list[Tool]):
     loop = asyncio.get_running_loop()
     frame_queue: asyncio.Queue[bytes] = asyncio.Queue()
 
-    connect_task = asyncio.create_task(_connect_realtime(agent_instructions))
+    connect_task = asyncio.create_task(_connect_realtime(agent_instructions, tools))
     input_stream_task = asyncio.create_task(_open_input_stream_async(audio, loop, frame_queue))
     output_stream_task = asyncio.create_task(_open_output_stream_async(audio))
 
@@ -98,7 +102,7 @@ async def run_realtime_conversation(audio: pyaudio.PyAudio, agent_instructions: 
         while True:
             async for response in ws:
                 res_1=json.loads(response)
-                log.info(f"Received event: {res_1.get('type')}")
+                #log.info(f"Received event: {res_1.get('type')}")
 
                 if res_1.get("type") == "response.output_audio.delta":
                     base64_audio_data = res_1.get("delta")
@@ -108,7 +112,7 @@ async def run_realtime_conversation(audio: pyaudio.PyAudio, agent_instructions: 
 
                 if res_1.get("type") == "response.function_call_arguments.done":
                     function_name = res_1.get("name")
-                    arguments = json.loads(res_1.get("arguments"))
+                    arguments = (res_1.get("arguments"))
                     call_id = res_1.get("call_id")
                     output = None
 
@@ -116,7 +120,33 @@ async def run_realtime_conversation(audio: pyaudio.PyAudio, agent_instructions: 
                         # throw an exception
                         log.info("User asked us to go to sleep, ending session.")
                         raise Exception("User asked us to go to sleep...")
-                    
+                    else:
+                        for tool in tools:
+                            try:
+                                output = tool.handle(function_name, arguments)
+                                if output:
+                                    log.info(f"Tool {tool.name} handled function call {function_name}")
+                                    break
+                            except Exception as e:
+                                log.exception(f"Error in tool {tool.name}: {e}")
+
+                    if output:
+                        message = {
+                            "type": "conversation.item.create",
+                            "item": {
+                                "type": "function_call_output",
+                                "output": output,
+                                "call_id": call_id
+                            }
+                        }
+                        await ws.send(json.dumps(message))
+
+                        # force generation after tool call
+                        message = {
+                                "type": "response.create"
+                            }
+                        await ws.send(json.dumps(message))
+
     except Exception as e:
         log.info(f"Error in conversation: {e}")
     finally:
@@ -133,10 +163,25 @@ async def run_realtime_conversation(audio: pyaudio.PyAudio, agent_instructions: 
             await ws.close()
 
 
-async def _connect_realtime(agent_instructions: str):
+async def _connect_realtime(agent_instructions: str, tools: list[Tool]):
+    all_tools = [tool.manifest() for tool in tools]
+
+    # always include the go_to_sleep tool
+    all_tools.append({
+        "name": "go_to_sleep",
+        "type": "function",
+        "description": "Puts the assistant to sleep and ends the current session.",
+        "parameters": {
+            "type": "object",
+            "properties": {},
+            "required": []
+        }
+    })
+
     additional_headers = {
         "Authorization": f"Bearer {settings.openai_api_key}"
     }
+    
     ws = await websockets.connect(
         "wss://api.openai.com/v1/realtime?model=gpt-realtime",
         additional_headers=additional_headers,
@@ -144,6 +189,7 @@ async def _connect_realtime(agent_instructions: str):
         ping_timeout=10,
         close_timeout=5
     )
+    
     event = {
         "type": "session.update",
         "session": {
@@ -176,19 +222,7 @@ async def _connect_realtime(agent_instructions: str):
             },
             "instructions": agent_instructions,
             "output_modalities": ['audio'],
-            "tools": [
-                {
-                    "name": "go_to_sleep",
-                    "type": "function",
-                    "description": "Puts the assistant to sleep and ends the curent session, call if the user asks you to go to sleep, shut up, stop it, etc.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                        },
-                        "required": []
-                    }
-                }
-            ],
+            "tools": all_tools,
             "tool_choice": "auto",
         }
     }

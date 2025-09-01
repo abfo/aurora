@@ -58,6 +58,13 @@ class Settings(BaseSettings):
         validation_alias="OPENAI_API_KEY",
     )
 
+    # Perplexity API key (read from env var PERPLEXITY_API_KEY)
+    perplexity_api_key: str = Field(
+        default="",
+        description="Perplexity API Key used for Perplexity services",
+        validation_alias="PERPLEXITY_API_KEY",
+    )
+
     # Agent instructions file path
     agent_instructions_path: str | None = Field(
         default=None,
