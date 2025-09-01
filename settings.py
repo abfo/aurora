@@ -51,6 +51,27 @@ class Settings(BaseSettings):
         validation_alias="WAKE_WORD_PATH",
     )
 
+    # OpenAI API key (read from env var OPENAI_API_KEY)
+    openai_api_key: str = Field(
+        default="",
+        description="OpenAI API Key used for OpenAI services",
+        validation_alias="OPENAI_API_KEY",
+    )
+
+    # Agent instructions file path
+    agent_instructions_path: str | None = Field(
+        default=None,
+        description="Path to a file containing system/agent instructions",
+        validation_alias="AGENT_INSTRUCTIONS_PATH",
+    )
+
+    # Agent voice selection (defaults to 'shimmer')
+    agent_voice: str = Field(
+        default="shimmer",
+        description="Voice name for the agent (e.g., shimmer)",
+        validation_alias="AGENT_VOICE",
+    )
+
 
 # A singleton-style instance for convenient imports
 settings = Settings()

@@ -17,11 +17,14 @@ pip install -r requirements.txt
 ### Environment variables
 
 - `PICO_API_KEY` (required): API key for Picovoice Porcupine.
+- `OPENAI_API_KEY` (required for realtime OpenAI features): API key for OpenAI.
 - `LOG_LEVEL` (optional): DEBUG, INFO, WARNING, ERROR. Default: INFO.
 - `LOG_FILE` (optional): Path to a log file; if set, logs will also be written there with daily rotation.
 - `INPUT_DEVICE_ID` (optional): PyAudio input device index.
 - `OUTPUT_DEVICE_ID` (optional): PyAudio output device index.
 - `WAKE_WORD_PATH` (optional): Full path to a Porcupine wake word model (.ppn). Not used yet.
+- `AGENT_INSTRUCTIONS_PATH` (optional): Path to a text file with system/agent instructions.
+- `AGENT_VOICE` (optional, default `shimmer`): Voice name for the agent.
 
 ### Logging
 
