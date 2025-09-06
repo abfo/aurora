@@ -5,7 +5,7 @@ import os
 import struct
 import time
 import wave
-
+from datetime import datetime, timedelta
 import requests
 from settings import settings
 from logging_config import configure_logging
@@ -16,17 +16,26 @@ import websockets
 from tools.base import load_plugins, Tool
 from audio_manager import AudioManager, ScheduledAudio
 from ui.base import AssistantUIBase, AssistantUIState
-from ui.debug import DebugUI
 
 _AUDIO_PLAYBACK_CHUNK = 1024
+_REALTIME_SAMPLERATE = 24000
+_REALTIME_FRAMESPERBUFFER = 4096
 
 def main():
     configure_logging(settings.log_level, settings.log_file)
     log = logging.getLogger("aurora")
 
-    # Initialize UI
+    # Initialize UI (lazy imports to avoid hardware deps on Windows)
     if settings.ui == "Debug":
+        from ui.debug import DebugUI
         ui = DebugUI(log)
+    elif settings.ui == "Braincraft":
+        try:
+            from ui.braincraft import BraincraftUI
+            ui = BraincraftUI(log)
+        except Exception:
+            log.exception("Braincraft UI not available on this platform")
+            return
     else:
         log.warning(f"Unknown UI implementation: {settings.ui}")
         return
@@ -60,7 +69,7 @@ def main():
                 scheduled_audio = audio_manager.get_audio()
                 if scheduled_audio:
                     ui.update_state(AssistantUIState.TALKING, reason="Playing scheduled audio")
-                    _play_scheduled_audio(audio, scheduled_audio)
+                    _play_scheduled_audio(audio, scheduled_audio, ui)
 
                 # Start listening for wake word
                 ui.update_state(AssistantUIState.SLEEPING, reason="Listening for wake word")
@@ -79,6 +88,7 @@ def main():
                 )
                 # Wake Word loop
                 due_audio = False
+                next_timer_update = datetime.now() + timedelta(seconds=1)
                 while True:
                     try:
                         sample = stream.read(porcupine.frame_length, exception_on_overflow = False)
@@ -89,6 +99,10 @@ def main():
                         if audio_manager.has_due_audio():
                             due_audio = True
                             break
+                        if datetime.now() > next_timer_update:
+                            next_timer_update = datetime.now() + timedelta(seconds=1)
+                            if audio_manager.has_any_audio():
+                                ui.set_timer_text(audio_manager.audio_to_text())
 
                     except Exception as e:
                         log.exception(f"Error in wake word loop: {e}")
@@ -136,9 +150,10 @@ async def run_realtime_conversation(
         ui: AssistantUIBase):
     loop = asyncio.get_running_loop()
     frame_queue: asyncio.Queue[bytes] = asyncio.Queue()
+    mic_gate = {"capture": True}
 
     connect_task = asyncio.create_task(_connect_realtime(agent_instructions, tools))
-    input_stream_task = asyncio.create_task(_open_input_stream_async(audio, loop, frame_queue))
+    input_stream_task = asyncio.create_task(_open_input_stream_async(audio, loop, frame_queue, lambda: mic_gate["capture"]))
     output_stream_task = asyncio.create_task(_open_output_stream_async(audio))
 
     log.info("Connecting to OpenAI Realtime API and opening audio streams...")
@@ -148,7 +163,7 @@ async def run_realtime_conversation(
     input_stream.start_stream()
     output_stream.start_stream()
     send_audio_task = asyncio.create_task(_send_audio_loop(ws, frame_queue))
-    due_audio_task = asyncio.create_task(_due_audio_loop(ws, audio_manager))
+    due_audio_task = asyncio.create_task(_due_audio_loop(ws, audio_manager, ui))
 
     log.info("Ready for conversation.")
     ui.update_state(AssistantUIState.LISTENING, reason="Listening for user input")
@@ -157,15 +172,23 @@ async def run_realtime_conversation(
         while True:
             async for response in ws:
                 res_1=json.loads(response)
-                log.info(f"Received event: {res_1.get('type')}")
+                #log.info(f"Received: {res_1.get('type')}")
+
+                # error, log it
+                if res_1.get("type") == "error":
+                    error = res_1.get("error")
+                    log.warning(f'Realtime Error: {error}')
 
                 # generating a response, update state
                 if res_1.get("type") == "response.created":
+                    mic_gate["capture"] = False
                     ui.update_state(AssistantUIState.TALKING, reason="Assistant responding")
 
                 # finished a response, update state
                 if res_1.get("type") == "response.done":
-                    ui.update_state(AssistantUIState.LISTENING, reason="Assistant finished")
+                    mic_gate["capture"] = True
+                    if ui.state != AssistantUIState.TOOL_CALLING: # if tool calling don't update
+                        ui.update_state(AssistantUIState.LISTENING, reason="Assistant finished")
 
                 # audio chunk received, play it
                 if res_1.get("type") == "response.output_audio.delta":
@@ -229,7 +252,6 @@ async def run_realtime_conversation(
             output_stream.close()
         if ws:
             await ws.close()
-
 
 async def _connect_realtime(agent_instructions: str, tools: list[Tool]):
     all_tools = [tool.manifest() for tool in tools]
@@ -296,7 +318,7 @@ async def _connect_realtime(agent_instructions: str, tools: list[Tool]):
     await ws.send(json.dumps(event))
     return ws
     
-async def _due_audio_loop(ws: websockets.ClientConnection, audio_manager:AudioManager):
+async def _due_audio_loop(ws: websockets.ClientConnection, audio_manager:AudioManager, ui: AssistantUIBase):
     while True:
         await asyncio.sleep(1)
         if audio_manager.has_due_audio():
@@ -338,36 +360,44 @@ async def _due_audio_loop(ws: websockets.ClientConnection, audio_manager:AudioMa
                 }
             await ws.send(json.dumps(messageRespond2))
 
+        elif audio_manager.has_any_audio():
+            ui.set_timer_text(audio_manager.audio_to_text())
+
 async def _send_audio_loop(ws: websockets.ClientConnection, frame_queue: asyncio.Queue):
     while True:
-        frame = await frame_queue.get()
-        if frame:
-            audio_event = {
-                "type": "input_audio_buffer.append",
-                "audio": base64.b64encode(frame).decode('utf-8')
-            }
-            await ws.send(json.dumps(audio_event))       
+        try:
+            frame = await frame_queue.get()
+            if frame:
+                audio_event = {
+                    "type": "input_audio_buffer.append",
+                    "audio": base64.b64encode(frame).decode('utf-8')
+                }
+                await ws.send(json.dumps(audio_event))       
+        except Exception:
+            pass
 
-def _make_audio_callback(loop, frame_queue: asyncio.Queue):
+def _make_audio_callback(loop, frame_queue: asyncio.Queue, should_capture):
     def _callback(in_data, frame_count, time_info, status_flags):
         # Push from PortAudio thread into the asyncio loop without blocking
         try:
-            loop.call_soon_threadsafe(frame_queue.put_nowait, in_data)
+            if should_capture():
+                asyncio.run_coroutine_threadsafe(frame_queue.put(in_data), loop)
+                # loop.call_soon_threadsafe(frame_queue.put_nowait, in_data)
         except Exception:
             pass
-        return (None, pyaudio.paContinue)
+        return (in_data, pyaudio.paContinue)
     return _callback
 
-async def _open_input_stream_async(audio: pyaudio.PyAudio, loop, frame_queue: asyncio.Queue):
+async def _open_input_stream_async(audio: pyaudio.PyAudio, loop, frame_queue: asyncio.Queue, should_capture):
     def _open():
         return audio.open(
             format=pyaudio.paInt16,
             channels=1,
-            rate=24000,
+            rate=_REALTIME_SAMPLERATE,
             input=True,
-            frames_per_buffer=4096,
+            frames_per_buffer=_REALTIME_FRAMESPERBUFFER,
             input_device_index=settings.input_device_id,
-            stream_callback=_make_audio_callback(loop, frame_queue),
+            stream_callback=_make_audio_callback(loop, frame_queue, should_capture),
             start=False,  # open but don't start yet
         )
     return await asyncio.to_thread(_open)
@@ -377,9 +407,9 @@ async def _open_output_stream_async(audio: pyaudio.PyAudio):
         return audio.open(
             format=pyaudio.paInt16,
             channels=1,
-            rate=24000,
+            rate=_REALTIME_SAMPLERATE,
             output=True,
-            frames_per_buffer=4096,
+            frames_per_buffer=_REALTIME_FRAMESPERBUFFER,
             output_device_index=settings.output_device_id,
             start=False,  # open but don't start yet
         )
@@ -402,7 +432,7 @@ def _play_scheduled_audio(audio: pyaudio.PyAudio, scheduled_audio: ScheduledAudi
             data = wf.readframes(_AUDIO_PLAYBACK_CHUNK)
 
             # audio playback is interrupted
-            if ui.is_cancel_pressed:
+            if ui.is_cancel_pressed():
                 break
         
         stream.stop_stream()

@@ -1,3 +1,7 @@
 pydantic>=2.7
 pydantic-settings>=2.2
 requests>=2.31
+websockets>=12
+openai>=1.40
+pyaudio>=0.2.14
+pvporcupine>=3.0

@@ -1,5 +1,6 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import Field
+from pathlib import Path
 
 
 class Settings(BaseSettings):
@@ -84,6 +85,28 @@ class Settings(BaseSettings):
         default="Debug",
         description="UI implementation to use (e.g., Debug)",
         validation_alias="UI",
+    )
+
+    # UI asset paths (optional)
+    alarm_font_path: Path | None = Field(
+        default=None,
+        description="Path to the TTF/OTF font used for alarm display",
+        validation_alias="ALARM_FONT_PATH",
+    )
+    image_talk_path: Path | None = Field(
+        default=None,
+        description="Path to the image used for TALK state",
+        validation_alias="IMAGE_TALK_PATH",
+    )
+    image_listen_path: Path | None = Field(
+        default=None,
+        description="Path to the image used for LISTEN state",
+        validation_alias="IMAGE_LISTEN_PATH",
+    )
+    image_sleep_path: Path | None = Field(
+        default=None,
+        description="Path to the image used for SLEEP state",
+        validation_alias="IMAGE_SLEEP_PATH",
     )
 
 
