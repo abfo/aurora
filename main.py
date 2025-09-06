@@ -5,6 +5,8 @@ import os
 import struct
 import time
 import wave
+
+import requests
 from settings import settings
 from logging_config import configure_logging
 import pvporcupine
@@ -13,12 +15,21 @@ import asyncio
 import websockets
 from tools.base import load_plugins, Tool
 from audio_manager import AudioManager, ScheduledAudio
+from ui.base import AssistantUIBase, AssistantUIState
+from ui.debug import DebugUI
 
 _AUDIO_PLAYBACK_CHUNK = 1024
 
 def main():
     configure_logging(settings.log_level, settings.log_file)
     log = logging.getLogger("aurora")
+
+    # Initialize UI
+    if settings.ui == "Debug":
+        ui = DebugUI(log)
+    else:
+        log.warning(f"Unknown UI implementation: {settings.ui}")
+        return
 
     # create audio manager and load tool plugins with it
     audio_manager = AudioManager(log)
@@ -34,15 +45,25 @@ def main():
             log.warning(f"Agent instructions file not found: {settings.agent_instructions_path}")
 
     try:
+        # wait for internet
+        _wait_for_internet_connection()
+        ui.update_state(AssistantUIState.LOAD_INTERNET, reason="Internet connection established")
+
+        # open audio and log available devices
         audio = pyaudio.PyAudio()
         _log_audio_devices(audio)
+        ui.update_state(AssistantUIState.LOAD_AUDIO, reason="Audio initialized")
 
         # Main loop
         while True:
             try:
                 scheduled_audio = audio_manager.get_audio()
                 if scheduled_audio:
+                    ui.update_state(AssistantUIState.TALKING, reason="Playing scheduled audio")
                     _play_scheduled_audio(audio, scheduled_audio)
+
+                # Start listening for wake word
+                ui.update_state(AssistantUIState.SLEEPING, reason="Listening for wake word")
 
                 porcupine = pvporcupine.create(
                     access_key=settings.pico_api_key,
@@ -91,7 +112,8 @@ def main():
                     agent_instructions, 
                     log, 
                     tools, 
-                    audio_manager
+                    audio_manager,
+                    ui
                 ))
 
             except Exception as e:
@@ -110,7 +132,8 @@ async def run_realtime_conversation(
         agent_instructions: str, 
         log: logging.Logger, 
         tools: list[Tool],
-        audio_manager: AudioManager):
+        audio_manager: AudioManager,
+        ui: AssistantUIBase):
     loop = asyncio.get_running_loop()
     frame_queue: asyncio.Queue[bytes] = asyncio.Queue()
 
@@ -128,12 +151,21 @@ async def run_realtime_conversation(
     due_audio_task = asyncio.create_task(_due_audio_loop(ws, audio_manager))
 
     log.info("Ready for conversation.")
+    ui.update_state(AssistantUIState.LISTENING, reason="Listening for user input")
 
     try:
         while True:
             async for response in ws:
                 res_1=json.loads(response)
                 log.info(f"Received event: {res_1.get('type')}")
+
+                # generating a response, update state
+                if res_1.get("type") == "response.created":
+                    ui.update_state(AssistantUIState.TALKING, reason="Assistant responding")
+
+                # finished a response, update state
+                if res_1.get("type") == "response.done":
+                    ui.update_state(AssistantUIState.LISTENING, reason="Assistant finished")
 
                 # audio chunk received, play it
                 if res_1.get("type") == "response.output_audio.delta":
@@ -144,6 +176,7 @@ async def run_realtime_conversation(
 
                 # need to call a function (tool call)
                 if res_1.get("type") == "response.function_call_arguments.done":
+                    ui.update_state(AssistantUIState.TOOL_CALLING, reason="Starting a tool call")
                     function_name = res_1.get("name")
                     arguments = (res_1.get("arguments"))
                     call_id = res_1.get("call_id")
@@ -352,7 +385,7 @@ async def _open_output_stream_async(audio: pyaudio.PyAudio):
         )
     return await asyncio.to_thread(_open)
 
-def _play_scheduled_audio(audio: pyaudio.PyAudio, scheduled_audio: ScheduledAudio):
+def _play_scheduled_audio(audio: pyaudio.PyAudio, scheduled_audio: ScheduledAudio, ui: AssistantUIBase):
     log = logging.getLogger("aurora")
     try:
         wf = wave.open(scheduled_audio.path, 'rb')
@@ -367,9 +400,14 @@ def _play_scheduled_audio(audio: pyaudio.PyAudio, scheduled_audio: ScheduledAudi
         while data != b'':
             stream.write(data)
             data = wf.readframes(_AUDIO_PLAYBACK_CHUNK)
+
+            # audio playback is interrupted
+            if ui.is_cancel_pressed:
+                break
         
         stream.stop_stream()
         stream.close()
+        wf.close()
 
         if (scheduled_audio.delete_after_play):
             try:
@@ -381,6 +419,15 @@ def _play_scheduled_audio(audio: pyaudio.PyAudio, scheduled_audio: ScheduledAudi
 
     except Exception as e:
         log.exception("Failed to play scheduled audio: %s", e)
+
+def _wait_for_internet_connection():
+    while True:
+        try:
+            requests.get('https://api.openai.com/').status_code
+            break
+        except:
+            time.sleep(5)
+            pass
 
 # log available audio devices
 def _log_audio_devices(audio: pyaudio.PyAudio):

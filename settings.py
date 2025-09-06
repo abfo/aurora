@@ -79,6 +79,13 @@ class Settings(BaseSettings):
         validation_alias="AGENT_VOICE",
     )
 
+    # UI implementation to use (default: Debug)
+    ui: str = Field(
+        default="Debug",
+        description="UI implementation to use (e.g., Debug)",
+        validation_alias="UI",
+    )
+
 
 # A singleton-style instance for convenient imports
 settings = Settings()
