@@ -1,8 +1,10 @@
 import base64
 import json
 import logging
+import os
 import struct
 import time
+import wave
 from settings import settings
 from logging_config import configure_logging
 import pvporcupine
@@ -10,13 +12,17 @@ import pyaudio
 import asyncio
 import websockets
 from tools.base import load_plugins, Tool
+from audio_manager import AudioManager, ScheduledAudio
+
+_AUDIO_PLAYBACK_CHUNK = 1024
 
 def main():
     configure_logging(settings.log_level, settings.log_file)
     log = logging.getLogger("aurora")
 
-    # load tool plugins
-    tools = load_plugins(log=log)
+    # create audio manager and load tool plugins with it
+    audio_manager = AudioManager(log)
+    tools = load_plugins(log=log, audio_manager=audio_manager)
 
     agent_instructions = "You are a helpful assistant."
     if settings.agent_instructions_path:
@@ -34,6 +40,10 @@ def main():
         # Main loop
         while True:
             try:
+                scheduled_audio = audio_manager.get_audio()
+                if scheduled_audio:
+                    _play_scheduled_audio(audio, scheduled_audio)
+
                 porcupine = pvporcupine.create(
                     access_key=settings.pico_api_key,
                     keyword_paths=[settings.wake_word_path]
@@ -47,6 +57,7 @@ def main():
                     input_device_index=settings.input_device_id
                 )
                 # Wake Word loop
+                due_audio = False
                 while True:
                     try:
                         sample = stream.read(porcupine.frame_length, exception_on_overflow = False)
@@ -54,20 +65,34 @@ def main():
                         keyword_index = porcupine.process(sample)
                         if keyword_index >= 0:
                             break
+                        if audio_manager.has_due_audio():
+                            due_audio = True
+                            break
 
                     except Exception as e:
                         log.exception(f"Error in wake word loop: {e}")
                         time.sleep(5)
                         break
 
-                # wake word detected
+                # cleanup wake word loop
                 if stream:
                     stream.stop_stream()
                     stream.close()
                 if porcupine:
                     porcupine.delete()
+
+                if due_audio:
+                    # got back to start of loop and play audio
+                    continue
+                
                 log.info("Wake word detected")
-                asyncio.run(run_realtime_conversation(audio, agent_instructions, log, tools))
+                asyncio.run(run_realtime_conversation(
+                    audio, 
+                    agent_instructions, 
+                    log, 
+                    tools, 
+                    audio_manager
+                ))
 
             except Exception as e:
                 log.exception(f"Error in main loop: {e}")
@@ -80,7 +105,12 @@ def main():
         if audio:
             audio.terminate()
 
-async def run_realtime_conversation(audio: pyaudio.PyAudio, agent_instructions: str, log: logging.Logger, tools: list[Tool]):
+async def run_realtime_conversation(
+        audio: pyaudio.PyAudio, 
+        agent_instructions: str, 
+        log: logging.Logger, 
+        tools: list[Tool],
+        audio_manager: AudioManager):
     loop = asyncio.get_running_loop()
     frame_queue: asyncio.Queue[bytes] = asyncio.Queue()
 
@@ -95,6 +125,7 @@ async def run_realtime_conversation(audio: pyaudio.PyAudio, agent_instructions: 
     input_stream.start_stream()
     output_stream.start_stream()
     send_audio_task = asyncio.create_task(_send_audio_loop(ws, frame_queue))
+    due_audio_task = asyncio.create_task(_due_audio_loop(ws, audio_manager))
 
     log.info("Ready for conversation.")
 
@@ -102,14 +133,16 @@ async def run_realtime_conversation(audio: pyaudio.PyAudio, agent_instructions: 
         while True:
             async for response in ws:
                 res_1=json.loads(response)
-                #log.info(f"Received event: {res_1.get('type')}")
+                log.info(f"Received event: {res_1.get('type')}")
 
+                # audio chunk received, play it
                 if res_1.get("type") == "response.output_audio.delta":
                     base64_audio_data = res_1.get("delta")
                     if base64_audio_data:
                         pcm_data = base64.b64decode(base64_audio_data)
                         output_stream.write(pcm_data)
 
+                # need to call a function (tool call)
                 if res_1.get("type") == "response.function_call_arguments.done":
                     function_name = res_1.get("name")
                     arguments = (res_1.get("arguments"))
@@ -151,6 +184,8 @@ async def run_realtime_conversation(audio: pyaudio.PyAudio, agent_instructions: 
         log.info(f"Error in conversation: {e}")
     finally:
         log.info("Conversation over, cleaning up.")
+        if due_audio_task:
+            due_audio_task.cancel()
         if send_audio_task:
             send_audio_task.cancel()
         if input_stream:
@@ -186,8 +221,7 @@ async def _connect_realtime(agent_instructions: str, tools: list[Tool]):
         "wss://api.openai.com/v1/realtime?model=gpt-realtime",
         additional_headers=additional_headers,
         ping_interval=30,
-        ping_timeout=10,
-        close_timeout=5
+        ping_timeout=25
     )
     
     event = {
@@ -229,6 +263,48 @@ async def _connect_realtime(agent_instructions: str, tools: list[Tool]):
     await ws.send(json.dumps(event))
     return ws
     
+async def _due_audio_loop(ws: websockets.ClientConnection, audio_manager:AudioManager):
+    while True:
+        await asyncio.sleep(1)
+        if audio_manager.has_due_audio():
+            message = {
+                    "type": "conversation.item.create",
+                    "item": {
+                        "type": "message",
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": "Call the go_to_sleep function"
+                            }
+                        ]
+                    }
+                }
+            await ws.send(json.dumps(message))
+            messageRespond = {
+                    "type": "response.create"
+                }
+            await ws.send(json.dumps(messageRespond))
+            await asyncio.sleep(1)
+            message2 = {
+                    "type": "conversation.item.create",
+                    "item": {
+                        "type": "message",
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": "This is important - you need to go to sleep now."
+                            }
+                        ]
+                    }
+                }
+            await ws.send(json.dumps(message2))
+            messageRespond2 = {
+                    "type": "response.create"
+                }
+            await ws.send(json.dumps(messageRespond2))
+
 async def _send_audio_loop(ws: websockets.ClientConnection, frame_queue: asyncio.Queue):
     while True:
         frame = await frame_queue.get()
@@ -275,6 +351,36 @@ async def _open_output_stream_async(audio: pyaudio.PyAudio):
             start=False,  # open but don't start yet
         )
     return await asyncio.to_thread(_open)
+
+def _play_scheduled_audio(audio: pyaudio.PyAudio, scheduled_audio: ScheduledAudio):
+    log = logging.getLogger("aurora")
+    try:
+        wf = wave.open(scheduled_audio.path, 'rb')
+
+        stream = audio.open(format=audio.get_format_from_width(wf.getsampwidth()),
+            channels=wf.getnchannels(),
+            rate=wf.getframerate(),
+            output_device_index=settings.output_device_id,
+            output=True)
+        
+        data = wf.readframes(_AUDIO_PLAYBACK_CHUNK)
+        while data != b'':
+            stream.write(data)
+            data = wf.readframes(_AUDIO_PLAYBACK_CHUNK)
+        
+        stream.stop_stream()
+        stream.close()
+
+        if (scheduled_audio.delete_after_play):
+            try:
+                os.remove(scheduled_audio.path)
+            except FileNotFoundError:
+                log.debug("Audio file already removed: %s", scheduled_audio.path)
+            except Exception:
+                log.exception("Failed to remove audio file: %s", scheduled_audio.path)
+
+    except Exception as e:
+        log.exception("Failed to play scheduled audio: %s", e)
 
 # log available audio devices
 def _log_audio_devices(audio: pyaudio.PyAudio):

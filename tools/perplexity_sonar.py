@@ -68,5 +68,5 @@ class PerplexitySonarSearch(Tool):
             return f'Failed to answer question: {err}'
         return answer
 
-def create_tool(log: Optional[logging.Logger] = None) -> Tool:
-    return PerplexitySonarSearch(log=log)
+def create_tool(log: Optional[logging.Logger] = None, audio_manager: Any | None = None) -> Tool:
+    return PerplexitySonarSearch(log=log, audio_manager=audio_manager)

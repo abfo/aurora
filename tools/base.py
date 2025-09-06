@@ -11,8 +11,9 @@ class Tool:
 
     name: str = ""
 
-    def __init__(self, log: Optional[logging.Logger] = None):
+    def __init__(self, log: Optional[logging.Logger] = None, audio_manager: Any | None = None):
         self.log = (log or logging.getLogger("aurora")).getChild(self.__class__.__name__)
+        self.audio_manager = audio_manager
 
     def is_configured(self) -> bool:
         """Return True if the tool has valid configuration and can be enabled."""
@@ -31,7 +32,7 @@ class Tool:
         raise NotImplementedError
 
 
-def load_plugins(log: Optional[logging.Logger] = None) -> list[Tool]:
+def load_plugins(log: Optional[logging.Logger] = None, audio_manager: Any | None = None) -> list[Tool]:
     """Discover and load tools from the tools package, excluding base.py.
 
     Each tool module should export `create_tool(log) -> Tool`.
@@ -56,7 +57,11 @@ def load_plugins(log: Optional[logging.Logger] = None) -> list[Tool]:
         try:
             module = importlib.import_module(full_name)
             if hasattr(module, "create_tool") and inspect.isfunction(module.create_tool):
-                tool = module.create_tool(log=logger)
+                # Prefer new signature with audio_manager, fall back if unavailable
+                try:
+                    tool = module.create_tool(log=logger, audio_manager=audio_manager)
+                except TypeError:
+                    tool = module.create_tool(log=logger)
                 if not isinstance(tool, Tool):
                     logger.warning("Module %s create_tool did not return a Tool instance", full_name)
                     continue
