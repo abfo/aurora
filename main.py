@@ -64,8 +64,13 @@ def main():
         ui.update_state(AssistantUIState.LOAD_AUDIO, reason="Audio initialized")
 
         # Main loop
+        shutdown_requested = False
         while True:
             try:
+                if shutdown_requested:
+                    log.info("User requested shutdown")
+                    break
+
                 scheduled_audio = audio_manager.get_audio()
                 if scheduled_audio:
                     ui.set_timer_text(audio_manager.audio_to_text())
@@ -97,6 +102,9 @@ def main():
                         keyword_index = porcupine.process(sample)
                         if keyword_index >= 0:
                             break
+                        if ui.is_shutdown_pressed():
+                            shutdown_requested = True
+                            break
                         if audio_manager.has_due_audio():
                             due_audio = True
                             break
@@ -116,6 +124,10 @@ def main():
                     stream.close()
                 if porcupine:
                     porcupine.delete()
+
+                if shutdown_requested:
+                    # got back to start of loop and shutdown
+                    continue
 
                 if due_audio:
                     # got back to start of loop and play audio
@@ -161,9 +173,9 @@ async def run_realtime_conversation(
     ws, input_stream, output_stream = await asyncio.gather(connect_task, input_stream_task, output_stream_task)
 
     log.info("Starting audio...")
+    send_audio_task = asyncio.create_task(_send_audio_loop(ws, frame_queue))
     input_stream.start_stream()
     output_stream.start_stream()
-    send_audio_task = asyncio.create_task(_send_audio_loop(ws, frame_queue))
     due_audio_task = asyncio.create_task(_due_audio_loop(ws, audio_manager, ui))
 
     log.info("Ready for conversation.")
@@ -179,6 +191,13 @@ async def run_realtime_conversation(
                 if res_1.get("type") == "error":
                     error = res_1.get("error")
                     log.warning(f'Realtime Error: {error}')
+
+                # conversation, log it
+                if res_1.get("type") == "conversation.item.created":
+                    item = res_1.get("item", {}) 
+                    if (item.get("type") == "message"):
+                        content = item.get("content", {})
+                        log.info(f"Conversation: {item.get('role')}: {content.get('text')}")
 
                 # generating a response, update state
                 if res_1.get("type") == "response.created":
@@ -241,7 +260,7 @@ async def run_realtime_conversation(
                         await ws.send(json.dumps(message))
 
     except Exception as e:
-        log.info(f"Error in conversation: {e}")
+        log.info(f"Error or user shutdown in conversation: {e}")
     finally:
         log.info("Conversation over, cleaning up.")
         if due_audio_task:
@@ -325,7 +344,7 @@ async def _connect_realtime(agent_instructions: str, tools: list[Tool]):
 async def _due_audio_loop(ws: websockets.ClientConnection, audio_manager:AudioManager, ui: AssistantUIBase):
     while True:
         await asyncio.sleep(1)
-        if audio_manager.has_due_audio():
+        if audio_manager.has_due_audio() or ui.is_cancel_pressed:
             message = {
                     "type": "conversation.item.create",
                     "item": {

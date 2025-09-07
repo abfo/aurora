@@ -7,6 +7,7 @@ import adafruit_dotstar
 import digitalio
 from PIL import Image, ImageDraw, ImageFont
 from adafruit_rgb_display import st7789 
+from adafruit_rgb_display import image_to_data 
 from settings import settings
 
 from .base import AssistantUIBase, AssistantUIState
@@ -88,6 +89,11 @@ class BraincraftUI(AssistantUIBase):
             self._image_listen = self._load_image(settings.image_listen_path)
             self._image_talk = self._load_image(settings.image_talk_path)
             self._image_state = ImageState.BLANK
+
+            # test image to data
+            dataTest = image_to_data(self._image_black, self._display.rotation)
+            self._display._block(0, 0, _DISPLAY_HEIGHT - 1, _DISPLAY_HEIGHT - 1, dataTest)
+
         except Exception:
             self._log.exception("Failed to initialize BraincraftUI")
             raise
@@ -211,6 +217,18 @@ class BraincraftUI(AssistantUIBase):
             self._display.image(image)
         except Exception:
             self._log.exception("_display_text failed")
+
+    def _to565(self, image: Image.Image) -> bytes | None:
+        """Convert PIL Image to RGB565 byte stream once; use library helper if available."""
+        try:
+            if image_to_data:
+                # Uses the Adafruit helper for correct 565 packing
+                return bytes(image_to_data(image, self._display.rotation))
+            # Fallback: let driver do conversion (returns None so caller can fallback)
+            return None
+        except Exception:
+            self._log.exception("_to565 conversion failed")
+            return None
 
     def _load_image(self, filename):
         try:
