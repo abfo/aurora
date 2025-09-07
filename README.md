@@ -1,33 +1,32 @@
 # Aurora
 
-Aurora is an Alexa-style assistant designed for Raspberry PI. It uses the OpenAI Realtime API and Picovoice Porcupine for wake word detection. 
+Aurora is an Alexa / Google Home style assistant implemented in python. The project includes a headless UX
+that just needs audio, and an implementation that runs on Raspberry PI 4 with the [Adafruit BrainCraft HAT](https://learn.adafruit.com/adafruit-braincraft-hat-easy-machine-learning-for-raspberry-pi).
 
-## Configuration
+Aurora uses the OpenAI realtime API. You need an [OpenAI API Key](https://platform.openai.com/). Wake word detection
+uses [Picovoice Porcupine](https://picovoice.ai/platform/porcupine/) and you need a free API key and model file.
 
-This project uses Pydantic Settings to load configuration from environment variables and an optional local `.env` file.
+![Aurora](/assets/aurora.png)
 
-Copy `.env.example` to `.env` and follow the instructions in the file (or set the appropriate environment variables).
+## Headless Configuration
 
-Create a virtual environment (recommended) and then install dependencies:
+Get the headless version up and running:
 
-```
-pip install -r requirements.txt
-```
+1. Clone this repo.
+2. Create a Python virtual enviroment (recommended).
+3. Install common dependencies (`pip install -r requirements.txt`).
+4. Copy .env.example to .env and follow the instructions within to configure. 
+5. Run main.py and start talking!
 
-### Environment variables
+## Adafruit BrainCraft Configuration
 
-- `PICO_API_KEY` (required): API key for Picovoice Porcupine.
-- `OPENAI_API_KEY` (required for realtime OpenAI features): API key for OpenAI.
-- `LOG_LEVEL` (optional): DEBUG, INFO, WARNING, ERROR. Default: INFO.
-- `LOG_FILE` (optional): Path to a log file; if set, logs will also be written there with daily rotation.
-- `INPUT_DEVICE_ID` (optional): PyAudio input device index.
-- `OUTPUT_DEVICE_ID` (optional): PyAudio output device index.
-- `WAKE_WORD_PATH` (optional): Full path to a Porcupine wake word model (.ppn). Not used yet.
-- `AGENT_INSTRUCTIONS_PATH` (optional): Path to a text file with system/agent instructions.
-- `AGENT_VOICE` (optional, default `shimmer`): Voice name for the agent.
+1. Follow the headless instructions above.
+2. Install Braincraft dependencies (`pip install -r requirements-braincraft.txt`)
+3. In .env change `UI` to `Braincraft` and provide paths to required assets (the assets folder of this
+project has some examples to get you started). 
+4. Run main.py and start talking! 
 
-### Logging
+Once you have a Raspberry PI 4 and BrainCraft HAT follow [these instructions](https://learn.adafruit.com/adafruit-braincraft-hat-easy-machine-learning-for-raspberry-pi/raspberry-pi-setup) to make sure the HAT 
+is configured and working properly. 
 
-Logging is configured via `logging_config.configure_logging()` using the standard library. By default it logs to stdout with timestamps. Control verbosity with `LOG_LEVEL` and optionally write to a file with `LOG_FILE`.
 
-To discover device IDs, set `LOG_LEVEL=DEBUG` and run the app; it will enumerate available input/output devices in the logs.
