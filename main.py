@@ -24,6 +24,7 @@ _REALTIME_FRAMESPERBUFFER = 4096
 def main():
     configure_logging(settings.log_level, settings.log_file)
     log = logging.getLogger("aurora")
+    log.info("Log level=%s, log_file=%s", logging.getLevelName(log.getEffectiveLevel()), settings.log_file)
 
     # Initialize UI (lazy imports to avoid hardware deps on Windows)
     if settings.ui == "Debug":
@@ -39,6 +40,11 @@ def main():
     else:
         log.warning(f"Unknown UI implementation: {settings.ui}")
         return
+    log.info("UI=%s", settings.ui)
+    
+    # We need internet
+    _wait_for_internet_connection()
+    ui.update_state(AssistantUIState.LOAD_INTERNET, reason="Internet initialized")
 
     # create audio manager and load tool plugins with it
     audio_manager = AudioManager(log)
@@ -53,11 +59,9 @@ def main():
         except FileNotFoundError:
             log.warning(f"Agent instructions file not found: {settings.agent_instructions_path}")
 
-    try:
-        # wait for internet
-        _wait_for_internet_connection()
-        ui.update_state(AssistantUIState.LOAD_INTERNET, reason="Internet connection established")
+    ui.update_state(AssistantUIState.LOAD_DISPLAY, reason="Display initialized")
 
+    try:
         # open audio and log available devices
         audio = pyaudio.PyAudio()
         _log_audio_devices(audio)
@@ -192,26 +196,19 @@ async def run_realtime_conversation(
                     error = res_1.get("error")
                     log.warning(f'Realtime Error: {error}')
 
-                # conversation, log it
-                if res_1.get("type") == "conversation.item.created":
-                    item = res_1.get("item", {}) 
-                    if (item.get("type") == "message"):
-                        content = item.get("content", {})
-                        log.info(f"Conversation: {item.get('role')}: {content.get('text')}")
-
                 # generating a response, update state
                 if res_1.get("type") == "response.created":
                     mic_gate["capture"] = False
+                    #frame_queue.empty()
                     ui.update_state(AssistantUIState.TALKING, reason="Assistant responding")
                     
                     # clear any captured audio
-                    await ws.send(json.dumps({ "type": "input_audio_buffer.clear" }))
+                    #await ws.send(json.dumps({ "type": "input_audio_buffer.clear" }))
 
                 # finished a response, update state
                 if res_1.get("type") == "response.done":
-                    mic_gate["capture"] = True
                     if ui.state != AssistantUIState.TOOL_CALLING: # if tool calling don't update
-                        ui.update_state(AssistantUIState.LISTENING, reason="Assistant finished")
+                        asyncio.create_task(_reopen_mic_delayed(mic_gate, 500, ui))
 
                 # audio chunk received, play it
                 if res_1.get("type") == "response.output_audio.delta":
@@ -317,11 +314,12 @@ async def _connect_realtime(agent_instructions: str, tools: list[Tool]):
                         "type": "far_field"
                     },
                     "turn_detection": {
-                        "create_response": True,
-                        "interrupt_response": True,
-                        "eagerness": "auto",
-                        "type": "semantic_vad"
-                    }
+                        "type": "server_vad",
+                        "threshold": 0.3,
+                        "prefix_padding_ms": 25,
+                        "silence_duration_ms": 750
+                    },
+                    "transcription": None,
                 },
                 "output": {
                     "format": {
@@ -344,7 +342,7 @@ async def _connect_realtime(agent_instructions: str, tools: list[Tool]):
 async def _due_audio_loop(ws: websockets.ClientConnection, audio_manager:AudioManager, ui: AssistantUIBase):
     while True:
         await asyncio.sleep(1)
-        if audio_manager.has_due_audio() or ui.is_cancel_pressed:
+        if audio_manager.has_due_audio() or ui.is_cancel_pressed():
             message = {
                     "type": "conversation.item.create",
                     "item": {
@@ -399,13 +397,17 @@ async def _send_audio_loop(ws: websockets.ClientConnection, frame_queue: asyncio
         except Exception:
             pass
 
+async def _reopen_mic_delayed(mic_gate, delay_ms: int, ui: AssistantUIBase):
+    await asyncio.sleep(delay_ms / 1000)
+    mic_gate["capture"] = True
+    ui.update_state(AssistantUIState.LISTENING, reason="Assistant finished")
+
 def _make_audio_callback(loop, frame_queue: asyncio.Queue, should_capture):
     def _callback(in_data, frame_count, time_info, status_flags):
         # Push from PortAudio thread into the asyncio loop without blocking
         try:
             if should_capture():
-                asyncio.run_coroutine_threadsafe(frame_queue.put(in_data), loop)
-                # loop.call_soon_threadsafe(frame_queue.put_nowait, in_data)
+                loop.call_soon_threadsafe(frame_queue.put_nowait, in_data)
         except Exception:
             pass
         return (in_data, pyaudio.paContinue)

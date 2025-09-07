@@ -7,7 +7,7 @@ import adafruit_dotstar
 import digitalio
 from PIL import Image, ImageDraw, ImageFont
 from adafruit_rgb_display import st7789 
-from adafruit_rgb_display import image_to_data 
+from adafruit_rgb_display.rgb import image_to_data 
 from settings import settings
 
 from .base import AssistantUIBase, AssistantUIState
@@ -84,15 +84,14 @@ class BraincraftUI(AssistantUIBase):
 
             self._font = ImageFont.truetype(settings.alarm_font_path, 27)
 
-            self._image_black = self._create_black_image()
-            self._image_sleep = self._load_image(settings.image_sleep_path)
-            self._image_listen = self._load_image(settings.image_listen_path)
-            self._image_talk = self._load_image(settings.image_talk_path)
+            self._image_black = image_to_data(self._create_black_image())
+            self._image_sleep = image_to_data(self._load_image(settings.image_sleep_path))
+            self._image_listen = image_to_data(self._load_image(settings.image_listen_path))
+            self._image_talk = image_to_data(self._load_image(settings.image_talk_path))
             self._image_state = ImageState.BLANK
 
-            # test image to data
-            dataTest = image_to_data(self._image_black, self._display.rotation)
-            self._display._block(0, 0, _DISPLAY_HEIGHT - 1, _DISPLAY_HEIGHT - 1, dataTest)
+            # black image to start
+            self._send_image_data(self._image_black)
 
         except Exception:
             self._log.exception("Failed to initialize BraincraftUI")
@@ -105,6 +104,7 @@ class BraincraftUI(AssistantUIBase):
         reason: str | None = None,
     ) -> None:
         try:
+            self._log.info("UI state changed from %s to %s: %s", previous, current, reason)
             self._update_state()
         except Exception:
             self._log.exception("on_state_changed failed")
@@ -190,17 +190,23 @@ class BraincraftUI(AssistantUIBase):
                 self._image_state = image_state
 
                 # black first
-                self._display.image(self._image_black)
+                self._send_image_data(self._image_black)
 
                 # then the reqested image
                 if (self._image_state == ImageState.SLEEP):
-                    self._display.image(self._image_sleep)
+                    self._send_image_data(self._image_sleep)
                 elif (self._image_state == ImageState.LISTEN):
-                    self._display.image(self._image_listen)
+                    self._send_image_data(self._image_listen)
                 elif (self._image_state == ImageState.TALK):
-                    self._display.image(self._image_talk)
+                    self._send_image_data(self._image_talk)
         except Exception:
             self._log.exception("_display_image failed")
+
+    def _send_image_data(self, data):
+        try:
+            self._display._block(0, 0, _DISPLAY_HEIGHT - 1, _DISPLAY_HEIGHT - 1, data)
+        except Exception:
+            self._log.exception("_send_image_data failed")
 
     def _display_text(self, text):
         try:
@@ -257,6 +263,7 @@ class BraincraftUI(AssistantUIBase):
             x = scaled_width // 2 - width // 2
             y = scaled_height // 2 - height // 2
             image = image.crop((x, y, x + width, y + height))
+            image = image.transpose(Image.ROTATE_180) 
             return image
         except Exception:
             self._log.exception("_load_image failed for %s", filename)
