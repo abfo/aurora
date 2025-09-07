@@ -92,6 +92,9 @@ class AudioManager:
     # -- Presentation ------------------------------------------------------
     def audio_to_text(self, now: Optional[datetime] = None) -> str:
         """Return a human-readable summary of timers with countdown mm:ss."""
+        if not self.has_any_audio():
+            return ""
+        
         now = now or datetime.now()
         lines: list[str] = []
         with self._lock:

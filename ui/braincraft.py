@@ -7,7 +7,7 @@ import adafruit_dotstar
 import digitalio
 from PIL import Image, ImageDraw, ImageFont
 from adafruit_rgb_display import st7789 
-import settings
+from settings import settings
 
 from .base import AssistantUIBase, AssistantUIState
 
@@ -56,7 +56,7 @@ class BraincraftUI(AssistantUIBase):
 
             # initialize dotstar
             self._dotstar = adafruit_dotstar.DotStar(
-                _DOTSTAR_DATA, _DOTSTAR_CLOCK, 3, brightness=0.05
+                _DOTSTAR_CLOCK, _DOTSTAR_DATA, 3, brightness=0.05
             )
 
             # all red until we start initializing 
@@ -80,6 +80,8 @@ class BraincraftUI(AssistantUIBase):
                 rst=self._reset_pin,
                 baudrate=_DISPLAY_BAUDRATE,
             )
+
+            self._font = ImageFont.truetype(settings.alarm_font_path, 27)
 
             self._image_black = self._create_black_image()
             self._image_sleep = self._load_image(settings.image_sleep_path)
@@ -123,10 +125,10 @@ class BraincraftUI(AssistantUIBase):
     
     def _update_state(self):
         try:
-            # alarm text is the highest priority
-            if self._alarm_text:
-                self._display_text(self._alarm_text)
-            
+            # timer text is the highest priority
+            if self._timer_text:
+                self._display_text(self._timer_text)
+
             next_image_state = ImageState.BLANK
 
             if self._state == AssistantUIState.LOAD_START:
@@ -170,7 +172,7 @@ class BraincraftUI(AssistantUIBase):
                 self._dotstar[1] = (0, 255, 0)
                 self._dotstar[2] = (0, 0, 0)
 
-            if not self._alarm_text:
+            if not self._timer_text:
                 if not next_image_state == ImageState.BLANK:
                     self._display_image(next_image_state)
         except Exception:
@@ -182,42 +184,42 @@ class BraincraftUI(AssistantUIBase):
                 self._image_state = image_state
 
                 # black first
-                self._display(self._image_black)
+                self._display.image(self._image_black)
 
                 # then the reqested image
                 if (self._image_state == ImageState.SLEEP):
-                    self._display(self._image_sleep)
+                    self._display.image(self._image_sleep)
                 elif (self._image_state == ImageState.LISTEN):
-                    self._display(self._image_listen)
+                    self._display.image(self._image_listen)
                 elif (self._image_state == ImageState.TALK):
-                    self._display(self._image_talk)
+                    self._display.image(self._image_talk)
         except Exception:
             self._log.exception("_display_image failed")
 
     def _display_text(self, text):
         try:
-            if self._disp.rotation % 180 == 90:
-                height = self._disp.width  # we swap height/width to rotate it to landscape!
-                width = self._disp.height
+            if self._display.rotation % 180 == 90:
+                height = self._display.width  # we swap height/width to rotate it to landscape!
+                width = self._display.height
             else:
-                width = self._disp.width  # we swap height/width to rotate it to landscape!
-                height = self._disp.height
+                width = self._display.width  # we swap height/width to rotate it to landscape!
+                height = self._display.height
 
             image = Image.new('RGB', (width, height), color=(0, 0, 0))
             draw = ImageDraw.Draw(image)
-            draw.text((20, 20), text, font=settings.alarm_font_path, fill=(255, 255, 255))
-            self._disp.image(image)
+            draw.text((20, 20), text, font=self._font, fill=(255, 255, 255))
+            self._display.image(image)
         except Exception:
             self._log.exception("_display_text failed")
 
     def _load_image(self, filename):
         try:
-            if self._disp.rotation % 180 == 90:
-                height = self._disp.width  # we swap height/width to rotate it to landscape!
-                width = self._disp.height
+            if self._display.rotation % 180 == 90:
+                height = self._display.width  # we swap height/width to rotate it to landscape!
+                width = self._display.height
             else:
-                width = self._disp.width  # we swap height/width to rotate it to landscape!
-                height = self._disp.height
+                width = self._display.width  # we swap height/width to rotate it to landscape!
+                height = self._display.height
 
             image = Image.open(filename)
             image.load()
@@ -244,12 +246,12 @@ class BraincraftUI(AssistantUIBase):
 
     def _create_black_image(self):
         try:
-            if self._disp.rotation % 180 == 90:
-                height = self._disp.width  # we swap height/width to rotate it to landscape!
-                width = self._disp.height
+            if self._display.rotation % 180 == 90:
+                height = self._display.width  # we swap height/width to rotate it to landscape!
+                width = self._display.height
             else:
-                width = self._disp.width  # we swap height/width to rotate it to landscape!
-                height = self._disp.height
+                width = self._display.width  # we swap height/width to rotate it to landscape!
+                height = self._display.height
 
             image = Image.new("RGB", (width, height))
 

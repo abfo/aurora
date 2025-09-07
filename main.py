@@ -68,6 +68,7 @@ def main():
             try:
                 scheduled_audio = audio_manager.get_audio()
                 if scheduled_audio:
+                    ui.set_timer_text(audio_manager.audio_to_text())
                     ui.update_state(AssistantUIState.TALKING, reason="Playing scheduled audio")
                     _play_scheduled_audio(audio, scheduled_audio, ui)
 
@@ -183,6 +184,9 @@ async def run_realtime_conversation(
                 if res_1.get("type") == "response.created":
                     mic_gate["capture"] = False
                     ui.update_state(AssistantUIState.TALKING, reason="Assistant responding")
+                    
+                    # clear any captured audio
+                    await ws.send(json.dumps({ "type": "input_audio_buffer.clear" }))
 
                 # finished a response, update state
                 if res_1.get("type") == "response.done":
