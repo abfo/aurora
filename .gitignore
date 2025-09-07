@@ -1,6 +1,7 @@
 .env
 *.ppn
 agent_instructions.txt
+agent_instructions.md
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

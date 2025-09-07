@@ -157,6 +157,8 @@ def main():
     finally:
         if audio:
             audio.terminate()
+        if ui:
+            ui.shutdown()
 
 async def run_realtime_conversation(
         audio: pyaudio.PyAudio, 

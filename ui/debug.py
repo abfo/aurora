@@ -38,3 +38,8 @@ class DebugUI(AssistantUIBase):
 
     def is_shutdown_pressed(self) -> bool:
         return False
+
+    # Lifecycle
+    def shutdown(self) -> None:
+        # Nothing to clean up for the debug UI.
+        pass

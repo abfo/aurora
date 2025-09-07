@@ -101,3 +101,8 @@ class AssistantUIBase(ABC):
     @abstractmethod
     def is_shutdown_pressed(self) -> bool:
         """Return True if the shutdown button is currently pressed."""
+
+    # -------------------- Lifecycle --------------------
+    @abstractmethod
+    def shutdown(self) -> None:
+        """Clean up UI resources before application exit."""

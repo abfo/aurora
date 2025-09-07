@@ -128,7 +128,13 @@ class BraincraftUI(AssistantUIBase):
         except Exception:
             self._log.exception("is_shutdown_pressed check failed")
             return False
-    
+
+    # Lifecycle
+    def shutdown(self) -> None:
+        self._send_image_data(self._image_black)
+        self._dotstar.deinit()
+        self._spi.deinit()
+
     def _update_state(self):
         try:
             # timer text is the highest priority
