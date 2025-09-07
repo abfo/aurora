@@ -2,3 +2,4 @@ Adafruit-Blinka>=8.0
 adafruit-circuitpython-dotstar>=2.0
 adafruit-circuitpython-rgb-display>=3.0
 Pillow>=10.0
+numpy>=1.26

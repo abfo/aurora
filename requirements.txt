@@ -5,3 +5,5 @@ websockets>=12
 openai>=1.40
 pyaudio>=0.2.14
 pvporcupine>=3.0
+todoist-api-python>=3.1
+tzdata>=2024.1

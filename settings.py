@@ -125,6 +125,33 @@ class Settings(BaseSettings):
         validation_alias="KID_NAME_B",
     )
 
+    # Todoist integration (optional)
+    todoist_api_key: str = Field(
+        default="",
+        description="Todoist API Key",
+        validation_alias="TODOIST_API_KEY",
+    )
+    todoist_todo_project_id: str | None = Field(
+        default="",
+        description="Todoist project ID for 'To Do' items",
+        validation_alias="TODOIST_TODO_PROJECT_ID",
+    )
+    todoist_shopping_project_id: str | None = Field(
+        default="",
+        description="Todoist project ID for 'Shopping' items",
+        validation_alias="TODOIST_SHOPPING_PROJECT_ID",
+    )
+    todoist_todo_due_details: str = Field(
+        default="Today",
+        description="Default due string for 'To Do' tasks (e.g., Today, tomorrow 6pm)",
+        validation_alias="TODOIST_TODO_DUE_DETAILS",
+    )
+    todoist_shopping_due_details: str = Field(
+        default="Saturday",
+        description="Default due string for 'Shopping' tasks",
+        validation_alias="TODOIST_SHOPPING_DUE_DETAILS",
+    )
+
 
 # A singleton-style instance for convenient imports
 settings = Settings()
