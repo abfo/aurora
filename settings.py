@@ -1,13 +1,19 @@
+import os
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import Field
 from pathlib import Path
+
+
+PROJECT_DIR = Path(__file__).resolve().parent
+ENV_FILE = os.getenv("AURORA_ENV_FILE", str(PROJECT_DIR / ".env"))
 
 
 class Settings(BaseSettings):
     """Application configuration loaded from environment and optional .env file."""
 
     model_config = SettingsConfigDict(
-        env_file=".env",
+    # Resolve .env relative to this file (override with AURORA_ENV_FILE)
+    env_file=ENV_FILE,
         extra="ignore",
         case_sensitive=False,
         env_ignore_empty=True,
