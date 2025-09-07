@@ -8,6 +8,8 @@ uses [Picovoice Porcupine](https://picovoice.ai/platform/porcupine/) and you nee
 
 ![Aurora](/assets/aurora.png)
 
+Read the [release post](https://ithoughthecamewithyou.com/post/aurora-the-raspberry-pi-smart-assistant) on my blog. 
+
 ## Tools
 
 Aurora supports a plugin system for tools. The follwing are included:
