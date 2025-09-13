@@ -114,6 +114,12 @@ class Settings(BaseSettings):
         description="Path to the image used for SLEEP state",
         validation_alias="IMAGE_SLEEP_PATH",
     )  
+    image_tool_path: Path | None = Field(
+        default=None,
+        description="Path to the image used for TOOL/processing state",
+        validation_alias="IMAGE_TOOL_PATH",
+    )
+
     kid_name_a: str | None = Field(
         default=None,
         description="Display name for Kid A",
