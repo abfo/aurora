@@ -29,7 +29,8 @@ class ImageState(Enum):
     SLEEP = 1
     TALK = 2
     LISTEN = 3
-    BLANK = 4  
+    TOOL = 4
+    BLANK = 5
 
 class BraincraftUI(AssistantUIBase):
     """Skeleton UI for Raspberry Pi 4 with Braincraft display.
@@ -88,6 +89,7 @@ class BraincraftUI(AssistantUIBase):
             self._image_sleep = image_to_data(self._load_image(settings.image_sleep_path))
             self._image_listen = image_to_data(self._load_image(settings.image_listen_path))
             self._image_talk = image_to_data(self._load_image(settings.image_talk_path))
+            self._image_tool = image_to_data(self._load_image(settings.image_tool_path))
             self._image_state = ImageState.BLANK
 
             # black image to start
@@ -179,7 +181,7 @@ class BraincraftUI(AssistantUIBase):
                 self._dotstar[1] = (0, 0, 0)
                 self._dotstar[2] = (0, 0, 0)
             elif self._state == AssistantUIState.TOOL_CALLING:
-                next_image_state = ImageState.SLEEP
+                next_image_state = ImageState.TOOL
                 self._dotstar[0] = (0, 0, 0)
                 self._dotstar[1] = (0, 255, 0)
                 self._dotstar[2] = (0, 0, 0)
@@ -205,6 +207,8 @@ class BraincraftUI(AssistantUIBase):
                     self._send_image_data(self._image_listen)
                 elif (self._image_state == ImageState.TALK):
                     self._send_image_data(self._image_talk)
+                elif (self._image_state == ImageState.TOOL):
+                    self._send_image_data(self._image_tool)
         except Exception:
             self._log.exception("_display_image failed")
 
