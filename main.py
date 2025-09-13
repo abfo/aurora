@@ -168,6 +168,13 @@ async def run_realtime_conversation(
         tools: list[Tool],
         audio_manager: AudioManager,
         ui: AssistantUIBase):
+    watchdog_task = None
+    due_audio_task = None
+    send_audio_task = None
+    input_stream = None
+    output_stream = None
+    ws = None
+
     loop = asyncio.get_running_loop()
     frame_queue: asyncio.Queue[bytes] = asyncio.Queue()
     mic_gate = {"capture": True}
@@ -187,7 +194,8 @@ async def run_realtime_conversation(
     due_audio_task = asyncio.create_task(_due_audio_loop(ws, audio_manager, ui))
     
     # Start watchdog timer
-    watchdog_task = asyncio.create_task(_watchdog_timer(watchdog_control, log))
+    log.info("Starting watchdog timer...")
+    watchdog_task = asyncio.create_task(_watchdog_timer(watchdog_control, log, ws))
 
     log.info("Ready for conversation.")
     ui.update_state(AssistantUIState.LISTENING, reason="Listening for user input")
@@ -206,11 +214,7 @@ async def run_realtime_conversation(
                 # generating a response, update state
                 if res_1.get("type") == "response.created":
                     mic_gate["capture"] = False
-                    #frame_queue.empty()
                     ui.update_state(AssistantUIState.TALKING, reason="Assistant responding")
-                    
-                    # clear any captured audio
-                    #await ws.send(json.dumps({ "type": "input_audio_buffer.clear" }))
 
                 # finished a response, update state and reset watchdog
                 if res_1.get("type") == "response.done":
@@ -284,20 +288,19 @@ async def run_realtime_conversation(
         if ws:
             await ws.close()
 
-async def _watchdog_timer(watchdog_control: dict, log: logging.Logger):
+async def _watchdog_timer(watchdog_control: dict, log: logging.Logger, ws: websockets.ClientConnection):
     """Watchdog timer that throws an exception if assistant doesn't finish speaking within the timeout."""
     while True:
         try:
+            await asyncio.sleep(1)
             # Wait for either timeout or reset event
             await asyncio.wait_for(watchdog_control["reset_event"].wait(), timeout=REALTIME_WATCHDOG_TIMEOUT_SECONDS)
             # If we get here, the reset event was set, so clear it and continue
             watchdog_control["reset_event"].clear()
-            log.debug("Watchdog timer reset - assistant finished speaking")
         except asyncio.TimeoutError:
-            # Timeout occurred - assistant didn't finish speaking in time
-            error_msg = f"Realtime conversation timeout: Assistant did not finish speaking within {REALTIME_WATCHDOG_TIMEOUT_SECONDS} seconds"
-            log.warning(error_msg)
-            raise Exception(error_msg)
+            log.info(f"Realtime conversation timeout: Assistant did not speak within {REALTIME_WATCHDOG_TIMEOUT_SECONDS} seconds")
+            await _trigger_sleep(ws)
+            break
 
 async def _connect_realtime(agent_instructions: str, tools: list[Tool]):
     all_tools = [tool.manifest() for tool in tools]
@@ -364,50 +367,60 @@ async def _connect_realtime(agent_instructions: str, tools: list[Tool]):
     }
     await ws.send(json.dumps(event))
     return ws
+
+async def _trigger_sleep(ws: websockets.ClientConnection):
+    try:
+        # tell the assistant to go to sleep
+        message = {
+                "type": "conversation.item.create",
+                "item": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "Call the go_to_sleep function"
+                        }
+                    ]
+                }
+            }
+        await ws.send(json.dumps(message))
+        messageRespond = {
+                "type": "response.create"
+            }
+        await ws.send(json.dumps(messageRespond))
+
+        # in case that doesn't work, repeat the message
+        await asyncio.sleep(2)
+        message2 = {
+                "type": "conversation.item.create",
+                "item": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "This is important - you need to go to sleep now."
+                        }
+                    ]
+                }
+            }
+        await ws.send(json.dumps(message2))
+        messageRespond2 = {
+                "type": "response.create"
+            }
+        await ws.send(json.dumps(messageRespond2))
+    except Exception:
+        pass
     
 async def _due_audio_loop(ws: websockets.ClientConnection, audio_manager:AudioManager, ui: AssistantUIBase):
     while True:
         await asyncio.sleep(1)
         if audio_manager.has_due_audio() or ui.is_cancel_pressed():
-            message = {
-                    "type": "conversation.item.create",
-                    "item": {
-                        "type": "message",
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "input_text",
-                                "text": "Call the go_to_sleep function"
-                            }
-                        ]
-                    }
-                }
-            await ws.send(json.dumps(message))
-            messageRespond = {
-                    "type": "response.create"
-                }
-            await ws.send(json.dumps(messageRespond))
-            await asyncio.sleep(1)
-            message2 = {
-                    "type": "conversation.item.create",
-                    "item": {
-                        "type": "message",
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "input_text",
-                                "text": "This is important - you need to go to sleep now."
-                            }
-                        ]
-                    }
-                }
-            await ws.send(json.dumps(message2))
-            messageRespond2 = {
-                    "type": "response.create"
-                }
-            await ws.send(json.dumps(messageRespond2))
-
+            # go to sleep if we have due audio
+            await _trigger_sleep(ws)
         elif audio_manager.has_any_audio():
+            # otherwise update any time text
             ui.set_timer_text(audio_manager.audio_to_text())
 
 async def _send_audio_loop(ws: websockets.ClientConnection, frame_queue: asyncio.Queue):
