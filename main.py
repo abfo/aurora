@@ -20,6 +20,7 @@ from ui.base import AssistantUIBase, AssistantUIState
 _AUDIO_PLAYBACK_CHUNK = 1024
 _REALTIME_SAMPLERATE = 24000
 _REALTIME_FRAMESPERBUFFER = 4096
+REALTIME_WATCHDOG_TIMEOUT_SECONDS = 120
 
 def main():
     configure_logging(settings.log_level, settings.log_file)
@@ -170,6 +171,7 @@ async def run_realtime_conversation(
     loop = asyncio.get_running_loop()
     frame_queue: asyncio.Queue[bytes] = asyncio.Queue()
     mic_gate = {"capture": True}
+    watchdog_control = {"reset_event": asyncio.Event()}
 
     connect_task = asyncio.create_task(_connect_realtime(agent_instructions, tools))
     input_stream_task = asyncio.create_task(_open_input_stream_async(audio, loop, frame_queue, lambda: mic_gate["capture"]))
@@ -183,6 +185,9 @@ async def run_realtime_conversation(
     input_stream.start_stream()
     output_stream.start_stream()
     due_audio_task = asyncio.create_task(_due_audio_loop(ws, audio_manager, ui))
+    
+    # Start watchdog timer
+    watchdog_task = asyncio.create_task(_watchdog_timer(watchdog_control, log))
 
     log.info("Ready for conversation.")
     ui.update_state(AssistantUIState.LISTENING, reason="Listening for user input")
@@ -207,8 +212,10 @@ async def run_realtime_conversation(
                     # clear any captured audio
                     #await ws.send(json.dumps({ "type": "input_audio_buffer.clear" }))
 
-                # finished a response, update state
+                # finished a response, update state and reset watchdog
                 if res_1.get("type") == "response.done":
+                    # Reset watchdog timer since assistant finished speaking
+                    watchdog_control["reset_event"].set()
                     if ui.state != AssistantUIState.TOOL_CALLING: # if tool calling don't update
                         asyncio.create_task(_reopen_mic_delayed(mic_gate, 500, ui))
 
@@ -262,6 +269,8 @@ async def run_realtime_conversation(
         log.info(f"Error or user shutdown in conversation: {e}")
     finally:
         log.info("Conversation over, cleaning up.")
+        if watchdog_task:
+            watchdog_task.cancel()
         if due_audio_task:
             due_audio_task.cancel()
         if send_audio_task:
@@ -274,6 +283,21 @@ async def run_realtime_conversation(
             output_stream.close()
         if ws:
             await ws.close()
+
+async def _watchdog_timer(watchdog_control: dict, log: logging.Logger):
+    """Watchdog timer that throws an exception if assistant doesn't finish speaking within the timeout."""
+    while True:
+        try:
+            # Wait for either timeout or reset event
+            await asyncio.wait_for(watchdog_control["reset_event"].wait(), timeout=REALTIME_WATCHDOG_TIMEOUT_SECONDS)
+            # If we get here, the reset event was set, so clear it and continue
+            watchdog_control["reset_event"].clear()
+            log.debug("Watchdog timer reset - assistant finished speaking")
+        except asyncio.TimeoutError:
+            # Timeout occurred - assistant didn't finish speaking in time
+            error_msg = f"Realtime conversation timeout: Assistant did not finish speaking within {REALTIME_WATCHDOG_TIMEOUT_SECONDS} seconds"
+            log.warning(error_msg)
+            raise Exception(error_msg)
 
 async def _connect_realtime(agent_instructions: str, tools: list[Tool]):
     all_tools = [tool.manifest() for tool in tools]
