@@ -89,11 +89,25 @@ class TimerSetTool(Tool):
             client = OpenAI(api_key=settings.openai_api_key)
             filename = self._get_random_filename(tempfile.gettempdir(), "wav")
 
+            responseInput = f"""Write a funny poem to announce that a timer has gone off. The poem need to include three parts:
+
+1. The name of the timer (which in this case is '{name}').
+2. Some wild speculation about what the timer is for (2-3 things). 
+3. Some increasingly wild speculation about the consequences of ignoring the timer (2-3 things). 
+
+Your persona is a helpful home assistant called Aurora. Your poem will be converted to speech using an OpenAI text to speech model. Please format your output for best results as a text to speech input."""
+
+            response = client.responses.create(
+                model="gpt-5",
+                input=responseInput
+            )
+
             ttsResponse = client.audio.speech.create(
-                model="tts-1-hd",
+                model="gpt-4o-mini-tts",
                 voice=settings.agent_voice,
                 response_format="wav",
-                input=f'beep beep beep beep this is your {name} timer beep beep beep beep this is your {name} timer beep beep beep beep it\'s still alarming beep beep beep beep push my button to switch this off BEEP BEEP BEEP BEEP last {name} timer warning BEEP BEEP BEEP BEEP BEEP BEEP BEEP BEEP ok, that\'s it, I tried by best - hope the {name} timer wasn\'t important'
+                input=response.output_text,
+                instructions="You are reciting funny poetry. Speak quickly and with emotion, with appropriate pauses for effect."
             )
 
             ttsResponse.write_to_file(filename)
