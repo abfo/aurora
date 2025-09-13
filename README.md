@@ -17,7 +17,8 @@ Aurora supports a plugin system for tools. The follwing are included:
 1. Timers - set, list and delete timers by name. 
 2. Todoist - add shopping and to do list items. 
 3. Perplexity Sonar - look up information using the Sonar API.
-4. Cheese Night - a simple tool to decide which kid gets the first pick of chores. 
+4. Cheese Night - a simple tool to decide which kid gets the first pick of chores.
+5. Next Transit - get predicted arrival times for a configured Bay Area public transit route.
 
 Tools are only included in realtime calls if configured (see .env.example), and it's easy to add a new tool by following the examples. If you make something useful please send a pull request. I'll add more tools over time and plan to look at MCP support too as this was recently added to the realtime API.  
 
