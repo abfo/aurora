@@ -152,6 +152,28 @@ class Settings(BaseSettings):
         validation_alias="TODOIST_SHOPPING_DUE_DETAILS",
     )
 
+    # Bay Area 511 transit tool (optional)
+    bay_area_511_api_key: str = Field(
+        default="",
+        description="Bay Area 511 API key",
+        validation_alias="BAY_AREA_511_API_KEY",
+    )
+    bay_area_511_agency: str | None = Field(
+        default=None,
+        description="Transit agency code for Bay Area 511",
+        validation_alias="BAY_AREA_511_AGENCY",
+    )
+    bay_area_511_stop_code: str | None = Field(
+        default=None,
+        description="Stop code for Bay Area 511",
+        validation_alias="BAY_AREA_511_STOP_CODE",
+    )
+    bay_area_511_friendly_name: str | None = Field(
+        default=None,
+        description="Friendly name for the transit line (e.g., 'L train' or '38 bus')",
+        validation_alias="BAY_AREA_511_FRIENDLY_NAME",
+    )
+
 
 # A singleton-style instance for convenient imports
 settings = Settings()
