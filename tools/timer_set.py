@@ -28,7 +28,7 @@ class TimerSetTool(Tool):
                 "properties": {
                     "name": {
                         "type": "string",
-                        "description": "A short human-friendly name for the timer",
+                        "description": "A short human-friendly name for the timer. Do not include 'timer' in the name unless that is explicitly the name.",
                     },
                     "due_seconds": {
                         "type": "integer",
@@ -50,6 +50,17 @@ class TimerSetTool(Tool):
         name = arguments.get("name")
         due_seconds = int(arguments.get("due_seconds"))
         due_time = datetime.now() + timedelta(seconds=max(0, due_seconds))
+
+        # Immediately schedule default audio if available for instant feedback
+        default_audio_file = settings.default_timer_audio_file
+        if default_audio_file and os.path.exists(default_audio_file):
+            self.audio_manager.add_audio(
+                due=due_time, 
+                path=default_audio_file, 
+                name=name, 
+                delete_after_play=False  # Don't delete default file
+            )
+            self.log.info("Scheduled default timer audio for '%s' at %s", name, due_time.isoformat())
 
         # Kick off background generation/scheduling so we can return immediately
         try:
@@ -95,7 +106,7 @@ class TimerSetTool(Tool):
 2. Some wild speculation about what the timer is for (2-3 things). 
 3. Some increasingly wild speculation about the consequences of ignoring the timer (2-3 things). 
 
-Your persona is a helpful home assistant called Aurora. Your poem will be converted to speech using an OpenAI text to speech model. Please format your output for best results as a text to speech input."""
+Your poem will be converted to speech using an OpenAI text to speech model. Please format your output for best results as a text to speech input. Just include the poem text, no other commentary. Use punctuation and line breaks to indicate pauses and intonation. Make it funny and engaging!"""
 
             response = client.responses.create(
                 model="gpt-5",
@@ -112,8 +123,18 @@ Your persona is a helpful home assistant called Aurora. Your poem will be conver
 
             ttsResponse.write_to_file(filename)
 
-            self.audio_manager.add_audio(due=due_time, path=filename, name=name, delete_after_play=True)
-            self.log.info("Scheduled timer '%s' at %s with audio %s", name, due_time.isoformat(), filename)
+            # Try to replace existing default audio with custom audio
+            # If no existing timer is found (e.g., timer already went off), just clean up the file
+            if not self.audio_manager.replace_audio(name, filename, new_delete_after_play=True):
+                # Timer not found - it may have already gone off and been deleted
+                # Clean up the custom audio file since it won't be used
+                try:
+                    os.remove(filename)
+                    self.log.info("Timer '%s' not found (may have already expired), cleaned up custom audio", name)
+                except Exception:
+                    self.log.exception("Failed to clean up unused custom audio file: %s", filename)
+            else:
+                self.log.info("Replaced default audio for timer '%s' with custom audio %s", name, filename)
         except Exception:
             self.log.exception("Error generating/scheduling audio for timer '%s'", name)
 
