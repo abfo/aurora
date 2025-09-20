@@ -180,6 +180,13 @@ class Settings(BaseSettings):
         validation_alias="BAY_AREA_511_FRIENDLY_NAME",
     )
 
+    # Default timer audio file (optional)
+    default_timer_audio_file: str | None = Field(
+        default=None,
+        description="Path to default timer alarm sound file (optional)",
+        validation_alias="DEFAULT_TIMER_AUDIO_FILE",
+    )
+
 
 # A singleton-style instance for convenient imports
 settings = Settings()

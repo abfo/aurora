@@ -69,6 +69,31 @@ class AudioManager:
                     except Exception:
                         self._log.exception("Failed to remove audio file: %s", it.path)
 
+    def replace_audio(self, name: str, new_path: str, new_delete_after_play: bool = True) -> bool:
+        """Replace the audio file for an existing timer with the given name.
+        
+        Returns True if a timer was found and replaced, False otherwise.
+        This is used to replace default timer audio with custom generated audio.
+        """
+        with self._lock:
+            for it in self._items:
+                if it.name == name:
+                    # Delete the old file if it was marked for deletion
+                    if it.delete_after_play:
+                        try:
+                            os.remove(it.path)
+                        except FileNotFoundError:
+                            self._log.debug("Audio file already removed: %s", it.path)
+                        except Exception:
+                            self._log.exception("Failed to remove old audio file: %s", it.path)
+                    
+                    # Update with new audio file
+                    it.path = new_path
+                    it.delete_after_play = new_delete_after_play
+                    self._log.info("Replaced audio for timer '%s' with %s", name, new_path)
+                    return True
+            return False
+
     # -- Queries -----------------------------------------------------------
     def has_due_audio(self, now: Optional[datetime] = None) -> bool:
         now = now or datetime.now()
