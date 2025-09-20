@@ -125,7 +125,7 @@ Your persona is a helpful home assistant called Aurora. Your poem will be conver
 
             # Try to replace existing default audio with custom audio
             # If no existing timer is found (e.g., timer already went off), just clean up the file
-            if not self.audio_manager.replace_audio(name, filename, delete_after_play=True):
+            if not self.audio_manager.replace_audio(name, filename, new_delete_after_play=True):
                 # Timer not found - it may have already gone off and been deleted
                 # Clean up the custom audio file since it won't be used
                 try:
