@@ -28,7 +28,7 @@ class TimerSetTool(Tool):
                 "properties": {
                     "name": {
                         "type": "string",
-                        "description": "A short human-friendly name for the timer",
+                        "description": "A short human-friendly name for the timer. Do not include 'timer' in the name unless that is explicitly the name.",
                     },
                     "due_seconds": {
                         "type": "integer",
@@ -106,7 +106,7 @@ class TimerSetTool(Tool):
 2. Some wild speculation about what the timer is for (2-3 things). 
 3. Some increasingly wild speculation about the consequences of ignoring the timer (2-3 things). 
 
-Your persona is a helpful home assistant called Aurora. Your poem will be converted to speech using an OpenAI text to speech model. Please format your output for best results as a text to speech input."""
+Your poem will be converted to speech using an OpenAI text to speech model. Please format your output for best results as a text to speech input. Just include the poem text, no other commentary. Use punctuation and line breaks to indicate pauses and intonation. Make it funny and engaging!"""
 
             response = client.responses.create(
                 model="gpt-5",
