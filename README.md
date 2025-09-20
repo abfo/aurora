@@ -43,4 +43,6 @@ project has some examples to get you started).
 Once you have a Raspberry PI 4 and BrainCraft HAT follow [these instructions](https://learn.adafruit.com/adafruit-braincraft-hat-easy-machine-learning-for-raspberry-pi/raspberry-pi-setup) to make sure the HAT 
 is configured and working properly. 
 
+A simple [case](/case/case.md) can be printed to house this version.
+
 
