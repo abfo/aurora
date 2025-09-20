@@ -12,4 +12,4 @@ The .stl files (case, lid, button, strut) are ready to slice and print. You'll n
 
 ## Assembly
 
-In addition to the printed parts you will need 6 M2.5 screws and optionally wall mounting hardware. Screw the Raspberry PI 4 onto the mounting holes in the case. Attatch the BrainCraft HAT and screw on the two struts to act as spacers where the board is not supported by the connector. Slide in the lid, and then push the button cap onto the 5-way button on the HAT. Mount to a wall if desired.
+In addition to the printed parts you will need 6 M2.5 screws and optionally wall mounting hardware. Screw the Raspberry PI 4 onto the mounting holes in the case. Attach the BrainCraft HAT and screw on the two struts to act as spacers where the board is not supported by the connector. Slide in the lid, and then push the button cap onto the 5-way button on the HAT. Mount to a wall if desired.
