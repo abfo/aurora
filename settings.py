@@ -187,6 +187,18 @@ class Settings(BaseSettings):
         validation_alias="DEFAULT_TIMER_AUDIO_FILE",
     )
 
+    # LIFX smart light control (optional)
+    lifx_auth_token: str = Field(
+        default="",
+        description="LIFX API authentication token",
+        validation_alias="LIFX_AUTH_TOKEN",
+    )
+    lifx_lights: str = Field(
+        default="{}",
+        description="JSON mapping of light names to LIFX light IDs (e.g., '{\"living room\": \"id:12345\", \"hallway\": \"label:Hall Light\"}')",
+        validation_alias="LIFX_LIGHTS",
+    )
+
 
 # A singleton-style instance for convenient imports
 settings = Settings()
