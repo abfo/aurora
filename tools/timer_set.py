@@ -125,7 +125,7 @@ Your poem will be converted to speech using an OpenAI text to speech model. Plea
 
             ttsResponse.write_to_file(filename)
 
-            if (replace_existing):
+            if replace_existing:
                 # Try to replace existing default audio with custom audio
                 # If no existing timer is found (e.g., timer already went off), just clean up the file
                 if not self.audio_manager.replace_audio(name, filename, new_delete_after_play=True):
