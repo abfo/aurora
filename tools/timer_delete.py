@@ -38,7 +38,7 @@ class TimerDeleteTool(Tool):
         
         arguments = json.loads(arguments)
         name = arguments.get("name")
-        self.audio_manager.delete_audio(name.lower())
+        self.audio_manager.remove_audio(name.lower())
         return f'Removed timer {name}'
 
 

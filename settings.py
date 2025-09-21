@@ -51,6 +51,13 @@ class Settings(BaseSettings):
         validation_alias="OUTPUT_DEVICE_ID",
     )
 
+    # Optional path to a folder containing recipes (spelling intentional)
+    recipes_folder: str | None = Field(
+        default=None,
+        description="Optional path to a folder containing recipes",
+        validation_alias="RECIPES_FOLDER",
+    )
+
     # Wake word model path (Porcupine .ppn file), optional for now
     wake_word_path: str | None = Field(
         default=None,
