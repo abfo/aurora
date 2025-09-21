@@ -343,10 +343,10 @@ async def _connect_realtime(agent_instructions: str, tools: list[Tool]):
                         "type": "far_field"
                     },
                     "turn_detection": {
-                        "type": "server_vad",
-                        "threshold": 0.3,
-                        "prefix_padding_ms": 25,
-                        "silence_duration_ms": 750
+                        "type": "semantic_vad",
+                        "create_response": True,
+                        "interrupt_response": False,
+                        "eagerness": "auto"
                     },
                     "transcription": None,
                 },
