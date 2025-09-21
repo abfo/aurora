@@ -50,6 +50,7 @@ class TimerSetTool(Tool):
         name = arguments.get("name")
         due_seconds = int(arguments.get("due_seconds"))
         due_time = datetime.now() + timedelta(seconds=max(0, due_seconds))
+        replace_existing = False
 
         # Immediately schedule default audio if available for instant feedback
         default_audio_file = settings.default_timer_audio_file
@@ -60,11 +61,12 @@ class TimerSetTool(Tool):
                 name=name, 
                 delete_after_play=False  # Don't delete default file
             )
+            replace_existing = True
             self.log.info("Scheduled default timer audio for '%s' at %s", name, due_time.isoformat())
 
         # Kick off background generation/scheduling so we can return immediately
         try:
-            self._start_async_audio_generation(name, due_time)
+            self._start_async_audio_generation(name, due_time, replace_existing)
         except Exception as e:
             self.log.exception("Failed to start background audio generation for timer '%s'", name)
             return f"Failed to set timer {name}: {e}"
@@ -72,10 +74,10 @@ class TimerSetTool(Tool):
         return f'Set a {name} timer for {due_seconds} seconds.'
 
     # --- Async scaffolding -------------------------------------------------
-    def _start_async_audio_generation(self, name: str, due_time: datetime) -> None:
+    def _start_async_audio_generation(self, name: str, due_time: datetime, replace_existing: bool) -> None:
         th = threading.Thread(
             target=self._generate_and_schedule_blocking,
-            args=(name, due_time),
+            args=(name, due_time, replace_existing),
             daemon=True,
         )
         th.start()
@@ -88,11 +90,11 @@ class TimerSetTool(Tool):
             filepath = os.path.join(directory, filename)
         return filepath
 
-    def _generate_and_schedule_blocking(self, name: str, due_time: datetime) -> None:
+    def _generate_and_schedule_blocking(self, name: str, due_time: datetime, replace_existing: bool) -> None:
         # Run the async coroutine in a dedicated event loop within this thread
-        asyncio.run(self._generate_audio_and_schedule(name, due_time))
+        asyncio.run(self._generate_audio_and_schedule(name, due_time, replace_existing))
 
-    async def _generate_audio_and_schedule(self, name: str, due_time: datetime) -> None:
+    async def _generate_audio_and_schedule(self, name: str, due_time: datetime, replace_existing: bool) -> None:
         try:
             # Placeholder for async TTS/audio creation work
             await asyncio.sleep(0)
@@ -123,18 +125,28 @@ Your poem will be converted to speech using an OpenAI text to speech model. Plea
 
             ttsResponse.write_to_file(filename)
 
-            # Try to replace existing default audio with custom audio
-            # If no existing timer is found (e.g., timer already went off), just clean up the file
-            if not self.audio_manager.replace_audio(name, filename, new_delete_after_play=True):
-                # Timer not found - it may have already gone off and been deleted
-                # Clean up the custom audio file since it won't be used
-                try:
-                    os.remove(filename)
-                    self.log.info("Timer '%s' not found (may have already expired), cleaned up custom audio", name)
-                except Exception:
-                    self.log.exception("Failed to clean up unused custom audio file: %s", filename)
+            if (replace_existing):
+                # Try to replace existing default audio with custom audio
+                # If no existing timer is found (e.g., timer already went off), just clean up the file
+                if not self.audio_manager.replace_audio(name, filename, new_delete_after_play=True):
+                    # Timer not found - it may have already gone off and been deleted
+                    # Clean up the custom audio file since it won't be used
+                    try:
+                        os.remove(filename)
+                        self.log.info("Timer '%s' not found (may have already expired), cleaned up custom audio", name)
+                    except Exception:
+                        self.log.exception("Failed to clean up unused custom audio file: %s", filename)
+                else:
+                    self.log.info("Replaced default audio for timer '%s' with custom audio %s", name, filename)
             else:
-                self.log.info("Replaced default audio for timer '%s' with custom audio %s", name, filename)
+                self.audio_manager.add_audio(
+                    due=due_time, 
+                    path=filename, 
+                    name=name, 
+                    delete_after_play=True  # Delete custom file after playing
+                )
+                self.log.info("Scheduled custom timer audio for '%s' at %s", name, due_time.isoformat())
+
         except Exception:
             self.log.exception("Error generating/scheduling audio for timer '%s'", name)
 
