@@ -20,7 +20,22 @@ from ui.base import AssistantUIBase, AssistantUIState
 _AUDIO_PLAYBACK_CHUNK = 1024
 _REALTIME_SAMPLERATE = 24000
 _REALTIME_FRAMESPERBUFFER = 4096
-REALTIME_WATCHDOG_TIMEOUT_SECONDS = 120
+_WS_PING_INTERVAL_SECONDS = 30
+_WS_PING_TIMEOUT_SECONDS = 25
+_REALTIME_WATCHDOG_TIMEOUT_SECONDS = 120
+
+_COOKING_INSTRUCTIONS = """
+
+# Cooking Mode
+
+IMPORTANT: you are currently helping the user cook. The recipe is included below. Follow the recipe instructions
+step by step and make sure the user has completed each step before moving to the next one. Do not skip steps unless
+asked to by the user. Answer any questions in the context of the recipe. If the recipe calls for a timer, set one for 
+the user. If the user wants to stop cooking, use the stop_cooking tool.
+
+The recipe:
+
+"""
 
 def main():
     configure_logging(settings.log_level, settings.log_file)
@@ -242,6 +257,51 @@ async def run_realtime_conversation(
                         # throw an exception
                         log.info("User asked us to go to sleep, ending session.")
                         raise Exception("User asked us to go to sleep...")
+                    elif function_name == "start_cooking":
+                        recipe_tool = next((tool for tool in tools if tool.name == "list_recipes"), None)
+                        if recipe_tool and recipe_tool.is_configured():
+                            try:
+                                args = json.loads(arguments)
+                            except Exception:
+                                output = "Invalid arguments payload"
+                            else:
+                                recipe_name = args.get("recipe_name")
+                                if not recipe_name:
+                                    output = "Missing required argument: recipe_name"
+                                else:
+                                    recipes_dir = recipe_tool._recipes_dir or recipe_tool._resolve_recipes_dir()
+                                    if not recipes_dir:
+                                        output = "Recipes folder is not configured or does not exist"
+                                    else:
+                                        recipe_path = (recipes_dir / recipe_name).resolve()
+                                        if not recipe_path.is_file() or recipe_path.suffix.lower() != ".md":
+                                            output = f"Recipe file not found: {recipe_name}"
+                                        else:
+                                            try:
+                                                with open(recipe_path, "r", encoding="utf-8") as f:
+                                                    recipe_content = f.read()
+                                                await _update_realtime_session(ws, agent_instructions, recipe_content, tools)
+
+                                                # Stop watchdog timer
+                                                log.info("Stopping watchdog timer...")
+                                                if watchdog_task:
+                                                    watchdog_task.cancel()
+                                                    watchdog_task = None
+
+                                                output = f"Started cooking session with recipe {recipe_name}."
+                                                log.info(f"Started cooking session with recipe {recipe_name}.")
+                                            except Exception as e:
+                                                log.exception(f"Failed to read recipe file {recipe_name}: {e}")
+                                                output = f"Failed to read recipe file {recipe_name}: {e}"
+                        else:
+                            output = "Recipe tool is not available."
+                    elif function_name == "stop_cooking":
+                        await _update_realtime_session(ws, agent_instructions, "", tools)
+                        # Start watchdog timer
+                        log.info("Restarting watchdog timer...")
+                        watchdog_task = asyncio.create_task(_watchdog_timer(watchdog_control, log, ws))
+                        output = "Stopped cooking session."
+                        log.info("Stopped cooking session.")
                     else:
                         for tool in tools:
                             try:
@@ -294,16 +354,22 @@ async def _watchdog_timer(watchdog_control: dict, log: logging.Logger, ws: webso
         try:
             await asyncio.sleep(1)
             # Wait for either timeout or reset event
-            await asyncio.wait_for(watchdog_control["reset_event"].wait(), timeout=REALTIME_WATCHDOG_TIMEOUT_SECONDS)
+            await asyncio.wait_for(watchdog_control["reset_event"].wait(), timeout=_REALTIME_WATCHDOG_TIMEOUT_SECONDS)
             # If we get here, the reset event was set, so clear it and continue
             watchdog_control["reset_event"].clear()
         except asyncio.TimeoutError:
-            log.info(f"Realtime conversation timeout: Assistant did not speak within {REALTIME_WATCHDOG_TIMEOUT_SECONDS} seconds")
+            log.info(f"Realtime conversation timeout: Assistant did not speak within {_REALTIME_WATCHDOG_TIMEOUT_SECONDS} seconds")
             await _trigger_sleep(ws)
             break
 
-async def _connect_realtime(agent_instructions: str, tools: list[Tool]):
+async def _update_realtime_session(ws: websockets.ClientConnection, agent_instructions: str, recipe: str, tools: list[Tool]):
     all_tools = [tool.manifest() for tool in tools]
+
+    full_instructions = None
+    if recipe:
+        full_instructions = f"{agent_instructions}{_COOKING_INSTRUCTIONS}{recipe}"
+    else:
+        full_instructions = agent_instructions
 
     # always include the go_to_sleep tool
     all_tools.append({
@@ -317,17 +383,35 @@ async def _connect_realtime(agent_instructions: str, tools: list[Tool]):
         }
     })
 
-    additional_headers = {
-        "Authorization": f"Bearer {settings.openai_api_key}"
-    }
-    
-    ws = await websockets.connect(
-        "wss://api.openai.com/v1/realtime?model=gpt-realtime",
-        additional_headers=additional_headers,
-        ping_interval=30,
-        ping_timeout=25
-    )
-    
+    ## if a recipe folder is configured add start/stop cooking tools
+    recipe_tool = next((tool for tool in tools if tool.name == "list_recipes"), None)
+    if recipe_tool and recipe_tool.is_configured():
+        all_tools.append({
+            "name": "start_cooking",
+            "type": "function",
+            "description": "Starts a cooking session with the specified recipe. Use the list_recipes tool to see available recipes.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "recipe_name": {
+                        "type": "string",
+                        "description": "The filename of the recipe to start (including .md extension)."
+                    }
+                },
+                "required": ["recipe_name"]
+            }
+        })
+        all_tools.append({
+            "name": "stop_cooking",
+            "type": "function",
+            "description": "Stops the current cooking session.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
+        })
+
     event = {
         "type": "session.update",
         "session": {
@@ -359,13 +443,28 @@ async def _connect_realtime(agent_instructions: str, tools: list[Tool]):
                     "voice": settings.agent_voice
                 }
             },
-            "instructions": agent_instructions,
+            "instructions": full_instructions,
             "output_modalities": ['audio'],
             "tools": all_tools,
             "tool_choice": "auto",
         }
     }
     await ws.send(json.dumps(event))
+
+async def _connect_realtime(agent_instructions: str, tools: list[Tool]):
+    additional_headers = {
+        "Authorization": f"Bearer {settings.openai_api_key}"
+    }
+    
+    ws = await websockets.connect(
+        "wss://api.openai.com/v1/realtime?model=gpt-realtime",
+        additional_headers=additional_headers,
+        ping_interval=_WS_PING_INTERVAL_SECONDS,
+        ping_timeout=_WS_PING_TIMEOUT_SECONDS
+    )
+    
+    await _update_realtime_session(ws, agent_instructions, "", tools)
+
     return ws
 
 async def _trigger_sleep(ws: websockets.ClientConnection):

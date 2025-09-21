@@ -15,6 +15,7 @@ Read the [release post](https://ithoughthecamewithyou.com/post/aurora-the-raspbe
 Aurora supports a plugin system for tools. The following are included:
 
 1. Timers - set, list and delete timers by name. 
+2. Cooking - help cook a recipe step by step. 
 2. Perplexity Sonar - look up information using the Sonar API.
 3. Todoist - add shopping and to do list items. 
 4. LIFX light control - turn on and off LIFX smart light bulbs.
