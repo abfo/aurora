@@ -391,7 +391,7 @@ async def _trigger_sleep(ws: websockets.ClientConnection):
         await ws.send(json.dumps(messageRespond))
 
         # in case that doesn't work, repeat the message
-        await asyncio.sleep(2)
+        await asyncio.sleep(1)
         message2 = {
                 "type": "conversation.item.create",
                 "item": {
