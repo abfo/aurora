@@ -86,6 +86,13 @@ class Settings(BaseSettings):
         validation_alias="AGENT_INSTRUCTIONS_PATH",
     )
 
+    # Realtime model selection (defaults to 'gpt-realtime-1.5')
+    realtime_model: str = Field(
+        default="gpt-realtime-1.5",
+        description="OpenAI realtime model to use (e.g., gpt-realtime-1.5)",
+        validation_alias="REALTIME_MODEL",
+    )
+
     # Agent voice selection (defaults to 'shimmer')
     agent_voice: str = Field(
         default="shimmer",

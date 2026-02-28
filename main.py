@@ -415,7 +415,7 @@ async def _update_realtime_session(ws: websockets.ClientConnection, agent_instru
     event = {
         "type": "session.update",
         "session": {
-            "model": "gpt-realtime",
+            "model": settings.realtime_model,
             "type": "realtime",
             "audio": {
                 "input" : {
@@ -457,7 +457,7 @@ async def _connect_realtime(agent_instructions: str, tools: list[Tool]):
     }
     
     ws = await websockets.connect(
-        "wss://api.openai.com/v1/realtime?model=gpt-realtime",
+        f"wss://api.openai.com/v1/realtime?model={settings.realtime_model}",
         additional_headers=additional_headers,
         ping_interval=_WS_PING_INTERVAL_SECONDS,
         ping_timeout=_WS_PING_TIMEOUT_SECONDS
