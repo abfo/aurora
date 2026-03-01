@@ -71,6 +71,7 @@ class TimerSetTool(Tool):
             self.log.exception("Failed to start background audio generation for timer '%s'", name)
             return f"Failed to set timer {name}: {e}"
 
+        self.analytics.report_event("Set Timer")    
         return f'Set a {name} timer for {due_seconds} seconds.'
 
     # --- Async scaffolding -------------------------------------------------
@@ -151,5 +152,5 @@ Your poem will be converted to speech using an OpenAI text to speech model. Plea
             self.log.exception("Error generating/scheduling audio for timer '%s'", name)
 
 
-def create_tool(log: Optional[logging.Logger] = None, audio_manager: Any | None = None) -> Tool:
-    return TimerSetTool(log=log, audio_manager=audio_manager)
+def create_tool(log: Optional[logging.Logger] = None, audio_manager: Any | None = None, **kwargs) -> Tool:
+    return TimerSetTool(log=log, audio_manager=audio_manager, **kwargs)

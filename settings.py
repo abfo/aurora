@@ -213,6 +213,23 @@ class Settings(BaseSettings):
         validation_alias="LIFX_LIGHTS",
     )
 
+    # Analytics (optional)
+    analytics_url: str | None = Field(
+        default=None,
+        description="URL endpoint for posting analytics events",
+        validation_alias="ANALYTICS_URL",
+    )
+    analytics_source: str | None = Field(
+        default=None,
+        description="Source identifier sent with analytics events",
+        validation_alias="ANALYTICS_SOURCE",
+    )
+    analytics_api_key: str | None = Field(
+        default=None,
+        description="API key for the analytics endpoint",
+        validation_alias="ANALYTICS_API_KEY",
+    )
+
 
 # A singleton-style instance for convenient imports
 settings = Settings()

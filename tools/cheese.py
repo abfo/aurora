@@ -50,9 +50,10 @@ class CheeseTool(Tool):
 
         unixoffset = datetime.now() - datetime(1970, 1, 1)
         kid = a if (unixoffset.days % 2 == 0) else b
+        self.analytics.report_event("Cheese")    
         return kid
 
 
-def create_tool(log: Optional[logging.Logger] = None, audio_manager: Any | None = None) -> Tool:
+def create_tool(log: Optional[logging.Logger] = None, audio_manager: Any | None = None, **kwargs) -> Tool:
     # audio_manager is unused for this tool
-    return CheeseTool(log=log, audio_manager=audio_manager)
+    return CheeseTool(log=log, audio_manager=audio_manager, **kwargs)

@@ -63,10 +63,11 @@ class PerplexitySonarSearch(Tool):
                 model="sonar-pro",
                 messages=messages,
             )
+            self.analytics.report_event("Sonar")    
             answer = response.choices[0].message.content
         except Exception as err:
             return f'Failed to answer question: {err}'
         return answer
 
-def create_tool(log: Optional[logging.Logger] = None, audio_manager: Any | None = None) -> Tool:
-    return PerplexitySonarSearch(log=log, audio_manager=audio_manager)
+def create_tool(log: Optional[logging.Logger] = None, audio_manager: Any | None = None, **kwargs) -> Tool:
+    return PerplexitySonarSearch(log=log, audio_manager=audio_manager, **kwargs)

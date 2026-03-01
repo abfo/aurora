@@ -39,8 +39,9 @@ class TimerDeleteTool(Tool):
         arguments = json.loads(arguments)
         name = arguments.get("name")
         self.audio_manager.remove_audio(name.lower())
+        self.analytics.report_event("Delete Timer")    
         return f'Removed timer {name}'
 
 
-def create_tool(log: Optional[logging.Logger] = None, audio_manager: Any | None = None) -> Tool:
-    return TimerDeleteTool(log=log, audio_manager=audio_manager)
+def create_tool(log: Optional[logging.Logger] = None, audio_manager: Any | None = None, **kwargs) -> Tool:
+    return TimerDeleteTool(log=log, audio_manager=audio_manager, **kwargs)

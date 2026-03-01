@@ -30,7 +30,8 @@ class TimerListTool(Tool):
         if not self.audio_manager:
             return "Audio manager not available"
 
+        self.analytics.report_event("List Timers")    
         return self.audio_manager.list_audio()
 
-def create_tool(log: Optional[logging.Logger] = None, audio_manager: Any | None = None) -> Tool:
-    return TimerListTool(log=log, audio_manager=audio_manager)
+def create_tool(log: Optional[logging.Logger] = None, audio_manager: Any | None = None, **kwargs) -> Tool:
+    return TimerListTool(log=log, audio_manager=audio_manager, **kwargs)

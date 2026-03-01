@@ -14,6 +14,7 @@ import pyaudio
 import asyncio
 import websockets
 from tools.base import load_plugins, Tool
+from analytics import Analytics
 from audio_manager import AudioManager, ScheduledAudio
 from ui.base import AssistantUIBase, AssistantUIState
 
@@ -64,7 +65,8 @@ def main():
 
     # create audio manager and load tool plugins with it
     audio_manager = AudioManager(log)
-    tools = load_plugins(log=log, audio_manager=audio_manager)
+    analytics = Analytics()
+    tools = load_plugins(log=log, audio_manager=audio_manager, analytics=analytics)
 
     agent_instructions = "You are a helpful assistant."
     if settings.agent_instructions_path:
@@ -160,7 +162,8 @@ def main():
                     log, 
                     tools, 
                     audio_manager,
-                    ui
+                    ui,
+                    analytics
                 ))
 
             except Exception as e:
@@ -182,7 +185,8 @@ async def run_realtime_conversation(
         log: logging.Logger, 
         tools: list[Tool],
         audio_manager: AudioManager,
-        ui: AssistantUIBase):
+        ui: AssistantUIBase,
+        analytics: Analytics):
     watchdog_task = None
     due_audio_task = None
     send_audio_task = None
@@ -214,6 +218,8 @@ async def run_realtime_conversation(
 
     log.info("Ready for conversation.")
     ui.update_state(AssistantUIState.LISTENING, reason="Listening for user input")
+
+    analytics.report_event("Conversation")
 
     try:
         while True:
@@ -256,6 +262,7 @@ async def run_realtime_conversation(
                     if function_name == "go_to_sleep":
                         # throw an exception
                         log.info("User asked us to go to sleep, ending session.")
+                        analytics.report_event("Sleep")
                         raise Exception("User asked us to go to sleep...")
                     elif function_name == "start_cooking":
                         recipe_tool = next((tool for tool in tools if tool.name == "list_recipes"), None)
@@ -290,6 +297,7 @@ async def run_realtime_conversation(
 
                                                 output = f"Started cooking session with recipe {recipe_name}."
                                                 log.info(f"Started cooking session with recipe {recipe_name}.")
+                                                analytics.report_event("Cooking")
                                             except Exception as e:
                                                 log.exception(f"Failed to read recipe file {recipe_name}: {e}")
                                                 output = f"Failed to read recipe file {recipe_name}: {e}"

@@ -53,8 +53,9 @@ class RecipeListTool(Tool):
             return f"Failed to list recipes: {err}"
 
         # Return JSON array of filenames for easy parsing by the model
+        self.analytics.report_event("Recipe List")    
         return json.dumps(files)
 
 
-def create_tool(log: Optional[logging.Logger] = None, audio_manager: Any | None = None) -> Tool:
-    return RecipeListTool(log=log, audio_manager=audio_manager)
+def create_tool(log: Optional[logging.Logger] = None, audio_manager: Any | None = None, **kwargs) -> Tool:
+    return RecipeListTool(log=log, audio_manager=audio_manager, **kwargs)
