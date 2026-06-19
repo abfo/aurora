@@ -20,13 +20,18 @@ don't set it off.
 ## How it works
 
 ```
-mic 16 kHz mono int16
+mic 24 kHz mono int16  (one always-open stream, shared with the realtime session)
   -> ring buffer (~1.2 s)            detector.py
   -> log-mel spectrogram             features.py   (SAME code used in training)
   -> CNN (aurora.onnx) -> probability
   -> smoothing + threshold + refractory
-  -> fires -> main.py starts the realtime conversation
+  -> fires -> main.py hands the live audio to the realtime conversation
 ```
+
+The detector runs at 24 kHz to match the OpenAI realtime API, so the same mic
+stream feeds both wake-word detection and the conversation. On wake, audio keeps
+flowing into a buffer and is flushed to the session once connected, so you can
+say "Aurora, when is the next L?" in one breath with no gap.
 
 `features.py` is shared by training and inference, which guarantees the model sees
 identical features in both - the most common source of "works in training, fails
@@ -55,7 +60,7 @@ Audio lives under `wake_word/data/` (git-ignored), organized by label:
 | `negatives/`      | normal speech / household chatter / silence       | not   |
 | `background/`     | noise / music / room tone (used for augmentation) | -     |
 
-Any sample rate is fine (files are resampled to 16 kHz mono on load). Name files
+Any sample rate is fine (files are resampled to 24 kHz mono on load). Name files
 `<speaker>_<n>.wav` (e.g. `kate_001.wav`) - the `<speaker>` prefix groups the
 train/validation split so we measure how well the model generalizes across voices.
 

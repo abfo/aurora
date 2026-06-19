@@ -5,6 +5,7 @@ import os
 import struct
 import time
 import wave
+from collections import deque
 from datetime import datetime, timedelta
 import requests
 from settings import settings
@@ -21,6 +22,13 @@ from ui.base import AssistantUIBase, AssistantUIState
 _AUDIO_PLAYBACK_CHUNK = 1024
 _REALTIME_SAMPLERATE = 24000
 _REALTIME_FRAMESPERBUFFER = 4096
+# Smaller input buffer (~43 ms @ 24 kHz) so wake-word detection stays responsive
+# and post-wake audio is buffered at fine granularity for the realtime handoff.
+_INPUT_FRAMESPERBUFFER = 1024
+# Seconds of audio kept before the wake word fires and replayed into the session
+# so the start of the utterance ("Aurora when is...") is never clipped.
+_WAKE_PREROLL_SECONDS = 0.8
+_WAKE_PREROLL_FRAMES = int(_WAKE_PREROLL_SECONDS * _REALTIME_SAMPLERATE / _INPUT_FRAMESPERBUFFER)
 _WS_PING_INTERVAL_SECONDS = 30
 _WS_PING_TIMEOUT_SECONDS = 25
 _REALTIME_WATCHDOG_TIMEOUT_SECONDS = 120
@@ -85,90 +93,17 @@ def main():
         _log_audio_devices(audio)
         ui.update_state(AssistantUIState.LOAD_AUDIO, reason="Audio initialized")
 
-        # Main loop
-        shutdown_requested = False
-        while True:
-            try:
-                if shutdown_requested:
-                    log.info("User requested shutdown")
-                    break
-
-                scheduled_audio = audio_manager.get_audio()
-                if scheduled_audio:
-                    ui.set_timer_text(audio_manager.audio_to_text())
-                    ui.update_state(AssistantUIState.TALKING, reason="Playing scheduled audio")
-                    _play_scheduled_audio(audio, scheduled_audio, ui)
-
-                # Start listening for wake word
-                ui.update_state(AssistantUIState.SLEEPING, reason="Listening for wake word")
-
-                detector = WakeWordDetector(
-                    settings.wake_word_model_path,
-                    threshold=settings.wake_word_threshold,
-                )
-                stream = audio.open(
-                    format=pyaudio.paInt16,
-                    channels=1,
-                    rate=detector.sample_rate,
-                    input=True,
-                    frames_per_buffer=detector.frame_length,
-                    input_device_index=settings.input_device_id
-                )
-                # Wake Word loop
-                due_audio = False
-                next_timer_update = datetime.now() + timedelta(seconds=1)
-                while True:
-                    try:
-                        sample = stream.read(detector.frame_length, exception_on_overflow = False)
-                        sample = struct.unpack_from("h" * detector.frame_length, sample)
-                        keyword_index = detector.process(sample)
-                        if keyword_index >= 0:
-                            break
-                        if ui.is_shutdown_pressed():
-                            shutdown_requested = True
-                            break
-                        if audio_manager.has_due_audio():
-                            due_audio = True
-                            break
-                        if datetime.now() > next_timer_update:
-                            next_timer_update = datetime.now() + timedelta(seconds=1)
-                            if audio_manager.has_any_audio():
-                                ui.set_timer_text(audio_manager.audio_to_text())
-
-                    except Exception as e:
-                        log.exception(f"Error in wake word loop: {e}")
-                        time.sleep(5)
-                        break
-
-                # cleanup wake word loop
-                if stream:
-                    stream.stop_stream()
-                    stream.close()
-                if detector:
-                    detector.delete()
-
-                if shutdown_requested:
-                    # got back to start of loop and shutdown
-                    continue
-
-                if due_audio:
-                    # got back to start of loop and play audio
-                    continue
-                
-                log.info("Wake word detected")
-                asyncio.run(run_realtime_conversation(
-                    audio, 
-                    agent_instructions, 
-                    log, 
-                    tools, 
-                    audio_manager,
-                    ui,
-                    analytics
-                ))
-
-            except Exception as e:
-                log.exception(f"Error in main loop: {e}")
-                time.sleep(5)
+        # Run the assistant: one persistent mic stream feeds wake-word detection
+        # while sleeping and the realtime session while talking (see _run_assistant).
+        asyncio.run(_run_assistant(
+            audio,
+            agent_instructions,
+            log,
+            tools,
+            audio_manager,
+            ui,
+            analytics
+        ))
 
     except Exception as e:
         log.exception(f"Error initializing audio: {e}")
@@ -179,10 +114,142 @@ def main():
         if ui:
             ui.shutdown()
 
+def _drain_queue(q: asyncio.Queue) -> None:
+    """Discard any buffered frames (e.g. stale audio before we start sleeping)."""
+    try:
+        while True:
+            q.get_nowait()
+    except asyncio.QueueEmpty:
+        pass
+
+async def _run_assistant(
+        audio: pyaudio.PyAudio,
+        agent_instructions: str,
+        log: logging.Logger,
+        tools: list[Tool],
+        audio_manager: AudioManager,
+        ui: AssistantUIBase,
+        analytics: Analytics):
+    """Own a single always-open mic stream and alternate between listening for
+    the wake word and running a realtime conversation.
+
+    The same stream and frame queue are used throughout, so audio spoken right
+    after the wake word (while the realtime websocket is still connecting) is
+    buffered in the queue and flushed once the session is ready - no gap, and
+    no closing/reopening of the input stream.
+    """
+    loop = asyncio.get_running_loop()
+    frame_queue: asyncio.Queue[bytes] = asyncio.Queue()
+    # mic_gate controls whether the callback enqueues frames. Off while the
+    # assistant is talking (avoids it hearing itself) and during alarm playback.
+    mic_gate = {"capture": True}
+
+    input_stream = await _open_input_stream_async(audio, loop, frame_queue, lambda: mic_gate["capture"])
+    input_stream.start_stream()
+
+    try:
+        while True:
+            # Play any due scheduled audio (timers/alarms) first.
+            scheduled_audio = audio_manager.get_audio()
+            if scheduled_audio:
+                ui.set_timer_text(audio_manager.audio_to_text())
+                ui.update_state(AssistantUIState.TALKING, reason="Playing scheduled audio")
+                mic_gate["capture"] = False
+                await asyncio.to_thread(_play_scheduled_audio, audio, scheduled_audio, ui)
+
+            # Listen for the wake word on the live mic.
+            ui.update_state(AssistantUIState.SLEEPING, reason="Listening for wake word")
+            mic_gate["capture"] = True
+            _drain_queue(frame_queue)
+
+            detector = WakeWordDetector(
+                settings.wake_word_model_path,
+                threshold=settings.wake_word_threshold,
+            )
+            outcome = await _wait_for_wake_word(detector, frame_queue, audio_manager, ui, log)
+            detector.delete()
+
+            if outcome == "shutdown":
+                log.info("User requested shutdown")
+                break
+            if outcome != "woke":
+                # due_audio or transient error: loop back to play audio / retry.
+                continue
+
+            log.info("Wake word detected")
+            # Show LISTENING immediately on wake so the user has feedback while
+            # the realtime session connects in the background.
+            ui.update_state(AssistantUIState.LISTENING, reason="Wake word detected")
+            # Hand the live queue to the conversation. Frames captured from here
+            # on (including during connect) are buffered and sent once connected.
+            await run_realtime_conversation(
+                audio,
+                frame_queue,
+                mic_gate,
+                agent_instructions,
+                log,
+                tools,
+                audio_manager,
+                ui,
+                analytics
+            )
+    finally:
+        if input_stream:
+            input_stream.stop_stream()
+            input_stream.close()
+
+async def _wait_for_wake_word(
+        detector: WakeWordDetector,
+        frame_queue: asyncio.Queue,
+        audio_manager: AudioManager,
+        ui: AssistantUIBase,
+        log: logging.Logger) -> str:
+    """Consume mic frames and feed the detector until the wake word fires.
+
+    Returns one of: "woke", "shutdown", "due_audio", "error".
+    """
+    next_timer_update = datetime.now() + timedelta(seconds=1)
+    preroll: deque[bytes] = deque(maxlen=_WAKE_PREROLL_FRAMES)
+    while True:
+        try:
+            frame = await frame_queue.get()
+            preroll.append(frame)
+            samples = struct.unpack_from("h" * (len(frame) // 2), frame)
+            if detector.process(samples) >= 0:
+                # Replay the buffered lead-in (incl. the wake word) so the start
+                # of the utterance reaches the realtime session uncut. Any frames
+                # already queued are newer than the pre-roll, so re-insert the
+                # pre-roll first, then those, to preserve chronological order.
+                newer = []
+                try:
+                    while True:
+                        newer.append(frame_queue.get_nowait())
+                except asyncio.QueueEmpty:
+                    pass
+                for f in preroll:
+                    frame_queue.put_nowait(f)
+                for f in newer:
+                    frame_queue.put_nowait(f)
+                return "woke"
+            if ui.is_shutdown_pressed():
+                return "shutdown"
+            if audio_manager.has_due_audio():
+                return "due_audio"
+            if datetime.now() > next_timer_update:
+                next_timer_update = datetime.now() + timedelta(seconds=1)
+                if audio_manager.has_any_audio():
+                    ui.set_timer_text(audio_manager.audio_to_text())
+        except Exception as e:
+            log.exception(f"Error in wake word loop: {e}")
+            await asyncio.sleep(5)
+            return "error"
+
 async def run_realtime_conversation(
-        audio: pyaudio.PyAudio, 
-        agent_instructions: str, 
-        log: logging.Logger, 
+        audio: pyaudio.PyAudio,
+        frame_queue: asyncio.Queue,
+        mic_gate: dict,
+        agent_instructions: str,
+        log: logging.Logger,
         tools: list[Tool],
         audio_manager: AudioManager,
         ui: AssistantUIBase,
@@ -190,25 +257,24 @@ async def run_realtime_conversation(
     watchdog_task = None
     due_audio_task = None
     send_audio_task = None
-    input_stream = None
     output_stream = None
     ws = None
 
-    loop = asyncio.get_running_loop()
-    frame_queue: asyncio.Queue[bytes] = asyncio.Queue()
-    mic_gate = {"capture": True}
+    # The input stream is already open and capturing; mic_gate stays True so that
+    # everything the user says after the wake word accumulates in frame_queue
+    # while we connect, then gets flushed by _send_audio_loop once the WS is up.
+    mic_gate["capture"] = True
     watchdog_control = {"reset_event": asyncio.Event()}
 
     connect_task = asyncio.create_task(_connect_realtime(agent_instructions, tools))
-    input_stream_task = asyncio.create_task(_open_input_stream_async(audio, loop, frame_queue, lambda: mic_gate["capture"]))
     output_stream_task = asyncio.create_task(_open_output_stream_async(audio))
 
-    log.info("Connecting to OpenAI Realtime API and opening audio streams...")
-    ws, input_stream, output_stream = await asyncio.gather(connect_task, input_stream_task, output_stream_task)
+    log.info("Connecting to OpenAI Realtime API and opening output stream...")
+    ws, output_stream = await asyncio.gather(connect_task, output_stream_task)
 
     log.info("Starting audio...")
+    # Flushes the buffered post-wake audio (and then live frames) to the session.
     send_audio_task = asyncio.create_task(_send_audio_loop(ws, frame_queue))
-    input_stream.start_stream()
     output_stream.start_stream()
     due_audio_task = asyncio.create_task(_due_audio_loop(ws, audio_manager, ui))
     
@@ -217,7 +283,6 @@ async def run_realtime_conversation(
     watchdog_task = asyncio.create_task(_watchdog_timer(watchdog_control, log, ws))
 
     log.info("Ready for conversation.")
-    ui.update_state(AssistantUIState.LISTENING, reason="Listening for user input")
 
     analytics.report_event("Conversation")
 
@@ -341,15 +406,15 @@ async def run_realtime_conversation(
         log.info(f"Error or user shutdown in conversation: {e}")
     finally:
         log.info("Conversation over, cleaning up.")
+        # Stop sending to the (closing) session; the input stream stays open for
+        # the next wake-word cycle. mic_gate is reset by the outer loop.
+        mic_gate["capture"] = False
         if watchdog_task:
             watchdog_task.cancel()
         if due_audio_task:
             due_audio_task.cancel()
         if send_audio_task:
             send_audio_task.cancel()
-        if input_stream:
-            input_stream.stop_stream()
-            input_stream.close()
         if output_stream:
             output_stream.stop_stream()
             output_stream.close()
@@ -566,7 +631,7 @@ async def _open_input_stream_async(audio: pyaudio.PyAudio, loop, frame_queue: as
             channels=1,
             rate=_REALTIME_SAMPLERATE,
             input=True,
-            frames_per_buffer=_REALTIME_FRAMESPERBUFFER,
+            frames_per_buffer=_INPUT_FRAMESPERBUFFER,
             input_device_index=settings.input_device_id,
             stream_callback=_make_audio_callback(loop, frame_queue, should_capture),
             start=False,  # open but don't start yet

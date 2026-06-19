@@ -1,7 +1,7 @@
 """Load audio from wake_word/data, augment it, and build feature tensors.
 
-Directory convention (all wavs, any sample rate -- they are resampled to 16 kHz
-mono on load)::
+Directory convention (all wavs, any sample rate -- they are resampled to
+config.SAMPLE_RATE (24 kHz) mono on load)::
 
     wake_word/data/
         positives/        "aurora" / "hey aurora"          -> label 1
@@ -64,8 +64,8 @@ def _resample_linear(x: np.ndarray, src_sr: int, dst_sr: int) -> np.ndarray:
     return np.interp(dst_t, src_t, x).astype(np.float32)
 
 
-def load_wav_16k_mono(path: str) -> np.ndarray:
-    """Load any wav as float32 mono at 16 kHz in roughly [-1, 1]."""
+def load_wav_mono(path: str) -> np.ndarray:
+    """Load any wav as float32 mono at config.SAMPLE_RATE in roughly [-1, 1]."""
     if sf is None:
         raise RuntimeError("soundfile is required: pip install -r wake_word/requirements-train.txt")
     data, sr = sf.read(path, dtype="float32", always_2d=False)
@@ -135,7 +135,7 @@ def _load_backgrounds() -> list[np.ndarray]:
     out = []
     for path in sorted(glob.glob(os.path.join(bg_dir, "*.wav"))):
         try:
-            out.append(load_wav_16k_mono(path))
+            out.append(load_wav_mono(path))
         except Exception:
             pass
     return out
@@ -157,7 +157,7 @@ def build_dataset(
         paths = sorted(glob.glob(os.path.join(cat_dir, "*.wav")))
         for path in paths:
             try:
-                wave = load_wav_16k_mono(path)
+                wave = load_wav_mono(path)
             except Exception as exc:  # noqa: BLE001
                 print(f"  skipped {path}: {exc}")
                 continue

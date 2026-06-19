@@ -1,6 +1,6 @@
 """Pure-numpy log-mel spectrogram frontend.
 
-This is the single source of truth for turning a 16 kHz mono waveform into the
+This is the single source of truth for turning a 24 kHz mono waveform into the
 2-D feature the CNN consumes. It is imported by BOTH the training data pipeline
 and the live :class:`~wake_word.detector.WakeWordDetector`, which guarantees
 train/inference parity without pulling librosa onto the Raspberry Pi.

@@ -4,7 +4,7 @@ Drop-in replacement for ``pvporcupine``. It exposes the same surface the wake
 word loop in ``main.py`` relies on::
 
     detector = WakeWordDetector(model_path)
-    detector.sample_rate     # 16000
+    detector.sample_rate     # 24000
     detector.frame_length    # 512
     idx = detector.process(sample)   # sample = tuple of int16; >=0 means detected
     detector.delete()

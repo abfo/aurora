@@ -9,30 +9,36 @@ any feature constant you MUST retrain the model.
 from __future__ import annotations
 
 # --- Audio ---------------------------------------------------------------
-SAMPLE_RATE = 16000          # Hz, mono. Matches the mic capture in main.py.
-FRAME_LENGTH = 512           # samples per stream.read() in the wake-word loop.
+# 24 kHz matches the OpenAI realtime API rate, so a single always-open mic
+# stream feeds both the wake word detector and the realtime session with no
+# resampling or stream reopen (see main.py).
+SAMPLE_RATE = 24000          # Hz, mono.
+FRAME_LENGTH = 1024          # nominal mic chunk (~43 ms @ 24 kHz).
 
 # --- Analysis window -----------------------------------------------------
 # The model classifies a sliding window of audio. 1.2s comfortably contains
 # "Aurora" / "Hey Aurora" spoken at a natural pace.
 WINDOW_SECONDS = 1.2
-WINDOW_SAMPLES = int(SAMPLE_RATE * WINDOW_SECONDS)   # 19200
+WINDOW_SAMPLES = int(SAMPLE_RATE * WINDOW_SECONDS)   # 28800
 
 # --- Log-mel spectrogram -------------------------------------------------
-N_FFT = 512
-HOP_LENGTH = 160             # 10 ms hop @ 16 kHz
+# Sized to ~32 ms window / 10 ms hop, matching the speech band. FMAX is capped
+# at 8 kHz (speech energy) rather than Nyquist so the features are insensitive
+# to source bandwidth.
+N_FFT = 768                  # ~32 ms @ 24 kHz
+HOP_LENGTH = 240             # 10 ms hop @ 24 kHz
 N_MELS = 40
 FMIN = 20.0
-FMAX = SAMPLE_RATE / 2       # 8000 Hz
+FMAX = 8000.0
 
 # Number of mel frames produced for a full window (see features.num_frames()).
-# 1 + (19200 - 512) // 160 = 117
+# 1 + (28800 - 768) // 240 = 117
 NUM_FRAMES = 1 + (WINDOW_SAMPLES - N_FFT) // HOP_LENGTH
 
 # --- Inference behaviour -------------------------------------------------
 # How often (in samples) the detector re-runs the model. ~100 ms keeps CPU low
 # on the Pi while still being responsive.
-EVAL_HOP_SAMPLES = 1600      # 100 ms
+EVAL_HOP_SAMPLES = 2400      # 100 ms
 
 # Detection smoothing / debouncing. A hit requires the smoothed probability to
 # stay above threshold for this many consecutive evaluations.

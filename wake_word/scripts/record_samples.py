@@ -12,7 +12,7 @@ Usage::
     # A few "Alexa" clips so the model learns to reject it:
     python wake_word/scripts/record_samples.py --speaker kate --label hard_negatives --count 8
 
-Files are saved as 16 kHz mono WAV to wake_word/data/<label>/<speaker>_<n>.wav,
+Files are saved as 24 kHz mono WAV to wake_word/data/<label>/<speaker>_<n>.wav,
 which also tags the speaker for cross-speaker train/val splits.
 """
 

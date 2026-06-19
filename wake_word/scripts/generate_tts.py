@@ -71,7 +71,7 @@ STYLES = [
 ]
 
 
-def _save_16k(audio_bytes: bytes, out_path: str) -> None:
+def _save_resampled(audio_bytes: bytes, out_path: str) -> None:
     data, sr = sf.read(io.BytesIO(audio_bytes), dtype="float32", always_2d=False)
     if data.ndim > 1:
         data = data.mean(axis=1)
@@ -136,7 +136,7 @@ def main() -> None:
                 instructions=style,
                 response_format="wav",
             )
-            _save_16k(resp.read(), out_path)
+            _save_resampled(resp.read(), out_path)
             done += 1
             if done % 10 == 0:
                 print(f"  {done}/{len(plan)}")
