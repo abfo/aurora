@@ -3,6 +3,12 @@
 agent_instructions.txt
 agent_instructions.md
 
+# Wake word training data (large + contains family voice recordings).
+# The trained model itself (wake_word/models/*.onnx + .json) IS committed.
+wake_word/data/
+wake_word/data_synth/
+wake_word/**/dataset.npz
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]

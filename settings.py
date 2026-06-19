@@ -19,13 +19,6 @@ class Settings(BaseSettings):
         env_ignore_empty=True,
     )
 
-    # Expose as `pico_api_key` in code, read from env var `PICO_API_KEY`
-    pico_api_key: str = Field(
-        default="",
-        description="PICO API Key used by the application",
-        validation_alias="PICO_API_KEY",
-    )
-
     log_level: str = Field(
         default="INFO",
         description="Root log level (DEBUG, INFO, WARNING, ERROR)",
@@ -58,11 +51,20 @@ class Settings(BaseSettings):
         validation_alias="RECIPES_FOLDER",
     )
 
-    # Wake word model path (Porcupine .ppn file), optional for now
-    wake_word_path: str | None = Field(
+    # Self-trained wake word model (ONNX) and detection threshold.
+    # See wake_word/README.md for how to train/retrain the model.
+    wake_word_model_path: str = Field(
+        default="wake_word/models/aurora.onnx",
+        description="Path to the exported wake word model (.onnx)",
+        validation_alias="WAKE_WORD_MODEL_PATH",
+    )
+
+    # Detection threshold. Lower = more sensitive (more false positives, fewer
+    # false negatives). Leave unset to use the value saved with the model.
+    wake_word_threshold: float | None = Field(
         default=None,
-        description="Path to the wake word model file (.ppn)",
-        validation_alias="WAKE_WORD_PATH",
+        description="Wake word detection threshold (0-1); None uses the model's saved value",
+        validation_alias="WAKE_WORD_THRESHOLD",
     )
 
     # OpenAI API key (read from env var OPENAI_API_KEY)

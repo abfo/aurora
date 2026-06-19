@@ -4,7 +4,8 @@ Aurora is an Alexa / Google Home style assistant implemented in python. The proj
 that just needs audio, and an implementation that runs on Raspberry PI 4 with the [Adafruit BrainCraft HAT](https://learn.adafruit.com/adafruit-braincraft-hat-easy-machine-learning-for-raspberry-pi).
 
 Aurora uses the OpenAI realtime API. You need an [OpenAI API Key](https://platform.openai.com/). Wake word detection
-uses [Picovoice Porcupine](https://picovoice.ai/platform/porcupine/) and you need a free API key and model file.
+uses a small, fully local model that we train ourselves (no third-party wake word service) - a trained "Aurora" model
+is included, and it's easy to add your own voice recordings and retrain. See [wake_word/README.md](/wake_word/README.md).
 
 ![Aurora](/assets/aurora.png)
 

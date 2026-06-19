@@ -1,0 +1,20 @@
+# Training-only dependencies for the Aurora wake word model.
+# NOT needed at runtime (the laptop/Pi only need numpy + onnxruntime from
+# the top-level requirements.txt). Install into your dev/training environment:
+#
+#     pip install -r wake_word/requirements-train.txt
+#
+torch>=2.2
+numpy>=1.26
+soundfile>=0.12
+scipy>=1.11
+librosa>=0.10
+scikit-learn>=1.3
+onnx>=1.15
+onnxscript>=0.1
+onnxruntime>=1.17
+openai>=1.40
+tqdm>=4.66
+matplotlib>=3.8
+jupyter>=1.0
+papermill>=2.5

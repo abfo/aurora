@@ -9,7 +9,7 @@ from datetime import datetime, timedelta
 import requests
 from settings import settings
 from logging_config import configure_logging
-import pvporcupine
+from wake_word.detector import WakeWordDetector
 import pyaudio
 import asyncio
 import websockets
@@ -100,16 +100,16 @@ def main():
                 # Start listening for wake word
                 ui.update_state(AssistantUIState.SLEEPING, reason="Listening for wake word")
 
-                porcupine = pvporcupine.create(
-                    access_key=settings.pico_api_key,
-                    keyword_paths=[settings.wake_word_path]
+                detector = WakeWordDetector(
+                    settings.wake_word_model_path,
+                    threshold=settings.wake_word_threshold,
                 )
                 stream = audio.open(
                     format=pyaudio.paInt16,
                     channels=1,
-                    rate=porcupine.sample_rate,
+                    rate=detector.sample_rate,
                     input=True,
-                    frames_per_buffer=porcupine.frame_length,
+                    frames_per_buffer=detector.frame_length,
                     input_device_index=settings.input_device_id
                 )
                 # Wake Word loop
@@ -117,9 +117,9 @@ def main():
                 next_timer_update = datetime.now() + timedelta(seconds=1)
                 while True:
                     try:
-                        sample = stream.read(porcupine.frame_length, exception_on_overflow = False)
-                        sample = struct.unpack_from("h" * porcupine.frame_length, sample)
-                        keyword_index = porcupine.process(sample)
+                        sample = stream.read(detector.frame_length, exception_on_overflow = False)
+                        sample = struct.unpack_from("h" * detector.frame_length, sample)
+                        keyword_index = detector.process(sample)
                         if keyword_index >= 0:
                             break
                         if ui.is_shutdown_pressed():
@@ -142,8 +142,8 @@ def main():
                 if stream:
                     stream.stop_stream()
                     stream.close()
-                if porcupine:
-                    porcupine.delete()
+                if detector:
+                    detector.delete()
 
                 if shutdown_requested:
                     # got back to start of loop and shutdown
