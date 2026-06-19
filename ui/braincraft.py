@@ -117,6 +117,28 @@ class BraincraftUI(AssistantUIBase):
         except Exception:
             self._log.exception("on_timer_text_changed failed")
 
+    # Wake-word training cues: all LEDs green for positives, red for negatives.
+    def show_training_prompt(self, label: str, index: int, total: int) -> None:
+        try:
+            color = (0, 255, 0) if label == "positives" else (255, 0, 0)
+            self._dotstar[0] = color
+            self._dotstar[1] = color
+            self._dotstar[2] = color
+            if label == "positives":
+                self._display_text(f"Say Aurora\n{index}/{total}")
+            else:
+                self._display_text(f"Say something\nelse {index}/{total}")
+        except Exception:
+            self._log.exception("show_training_prompt failed")
+
+    def clear_training_lights(self) -> None:
+        try:
+            self._dotstar[0] = (0, 0, 0)
+            self._dotstar[1] = (0, 0, 0)
+            self._dotstar[2] = (0, 0, 0)
+        except Exception:
+            self._log.exception("clear_training_lights failed")
+
     def is_cancel_pressed(self) -> bool:
         try:
             return not self._joyselect.value

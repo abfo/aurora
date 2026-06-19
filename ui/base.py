@@ -93,6 +93,23 @@ class AssistantUIBase(ABC):
     def on_timer_text_changed(self, text: str) -> None:
         """Hook called when timer text changes. Default is no-op."""
 
+    # -------------------- Wake-word training cues --------------------
+    def show_training_prompt(self, label: str, index: int, total: int) -> None:
+        """Cue the user to speak a wake-word training clip.
+
+        Called once per clip during the guided training flow. ``label`` is the
+        training class being recorded ("positives" or "negatives"), and
+        ``index``/``total`` are the 1-based clip number. Implementations should
+        give the user a clear, distinct signal (e.g. all LEDs green for
+        positives, all red for negatives). Default is a no-op.
+        """
+
+    def clear_training_lights(self) -> None:
+        """Clear any training cue shown by show_training_prompt (e.g. LEDs off).
+
+        Called between clips and when training ends. Default is a no-op.
+        """
+
     # -------------------- User controls --------------------
     @abstractmethod
     def is_cancel_pressed(self) -> bool:

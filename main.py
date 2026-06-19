@@ -11,6 +11,7 @@ import requests
 from settings import settings
 from logging_config import configure_logging
 from wake_word.detector import WakeWordDetector
+from wake_word import collect
 import pyaudio
 import asyncio
 import websockets
@@ -182,7 +183,7 @@ async def _run_assistant(
             ui.update_state(AssistantUIState.LISTENING, reason="Wake word detected")
             # Hand the live queue to the conversation. Frames captured from here
             # on (including during connect) are buffered and sent once connected.
-            await run_realtime_conversation(
+            action = await run_realtime_conversation(
                 audio,
                 frame_queue,
                 mic_gate,
@@ -193,6 +194,24 @@ async def _run_assistant(
                 ui,
                 analytics
             )
+
+            # The conversation may ask us to run wake-word training capture once
+            # the session has ended (it needs the mic stream / UI we own here).
+            if action and action.get("action") == "train_wake_word":
+                ui.update_state(AssistantUIState.TOOL_CALLING, reason="Wake word training")
+                try:
+                    await collect.collect_training_samples(
+                        frame_queue,
+                        mic_gate,
+                        ui,
+                        action.get("name", ""),
+                        log,
+                        collect_dir=settings.wake_word_collect_dir,
+                    )
+                except Exception as e:
+                    log.exception("Wake word training capture failed: %s", e)
+                # Fall through; the loop returns to SLEEPING and re-arms the wake
+                # word, and the next conversation uses the normal prompt again.
     finally:
         if input_stream:
             input_stream.stop_stream()
@@ -259,6 +278,9 @@ async def run_realtime_conversation(
     send_audio_task = None
     output_stream = None
     ws = None
+    # Optional action for the outer loop to run after this session ends (e.g.
+    # wake-word training capture). None means just go back to sleep.
+    post_action = None
 
     # The input stream is already open and capturing; mic_gate stays True so that
     # everything the user says after the wake word accumulates in frame_queue
@@ -329,6 +351,25 @@ async def run_realtime_conversation(
                         log.info("User asked us to go to sleep, ending session.")
                         analytics.report_event("Sleep")
                         raise Exception("User asked us to go to sleep...")
+                    elif function_name == "start_wake_word_training":
+                        # Swap the session into training mode (dedicated prompt +
+                        # minimal tools); Aurora then collects a name and explains
+                        # the rules before calling begin_wake_word_capture.
+                        log.info("Entering wake word training mode.")
+                        analytics.report_event("WakeWordTraining")
+                        await _enter_training_session(ws)
+                        output = "Entered wake word training mode."
+                    elif function_name == "begin_wake_word_capture":
+                        # End this session and run the capture routine in the outer
+                        # loop, which owns the mic stream and UI.
+                        try:
+                            args = json.loads(arguments)
+                        except Exception:
+                            args = {}
+                        name = args.get("name") or ""
+                        log.info("Starting wake word capture for '%s'.", name)
+                        post_action = {"action": "train_wake_word", "name": name}
+                        raise Exception("Beginning wake word capture...")
                     elif function_name == "start_cooking":
                         recipe_tool = next((tool for tool in tools if tool.name == "list_recipes"), None)
                         if recipe_tool and recipe_tool.is_configured():
@@ -421,6 +462,8 @@ async def run_realtime_conversation(
         if ws:
             await ws.close()
 
+    return post_action
+
 async def _watchdog_timer(watchdog_control: dict, log: logging.Logger, ws: websockets.ClientConnection):
     """Watchdog timer that throws an exception if assistant doesn't finish speaking within the timeout."""
     while True:
@@ -449,6 +492,25 @@ async def _update_realtime_session(ws: websockets.ClientConnection, agent_instru
         "name": "go_to_sleep",
         "type": "function",
         "description": "Puts the assistant to sleep and ends the current session.",
+        "parameters": {
+            "type": "object",
+            "properties": {},
+            "required": []
+        }
+    })
+
+    # always offer wake-word training. The description is the trigger: the model
+    # calls this when a user asks to help train/teach the assistant to recognize
+    # their voice or the wake word. Handling it swaps in the dedicated training
+    # prompt and tool set (see _enter_training_session).
+    all_tools.append({
+        "name": "start_wake_word_training",
+        "type": "function",
+        "description": (
+            "Start wake-word training. Call this when the user asks to help train or "
+            "teach Aurora to recognize their voice or the wake word (e.g. 'help me train "
+            "you to recognize my voice', 'train your wake word')."
+        ),
         "parameters": {
             "type": "object",
             "properties": {},
@@ -519,6 +581,85 @@ async def _update_realtime_session(ws: websockets.ClientConnection, agent_instru
             "instructions": full_instructions,
             "output_modalities": ['audio'],
             "tools": all_tools,
+            "tool_choice": "auto",
+        }
+    }
+    await ws.send(json.dumps(event))
+
+async def _enter_training_session(ws: websockets.ClientConnection):
+    """Swap the live session into wake-word training mode.
+
+    Fully replaces the instructions with the dedicated training prompt and the
+    tool set with just begin_wake_word_capture + go_to_sleep, so the model stays
+    on-script while it collects a name and explains the rules. The regular prompt
+    is restored automatically on the next conversation (each one reconnects with
+    agent_instructions), so there is no "stop training" tool to call.
+    """
+    training_tools = [
+        {
+            "name": "begin_wake_word_capture",
+            "type": "function",
+            "description": (
+                "Begin recording the wake-word training clips. Call this once the user "
+                "has given their name and is ready to start saying the words."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "The first name of the person doing the training."
+                    }
+                },
+                "required": ["name"]
+            }
+        },
+        {
+            "name": "go_to_sleep",
+            "type": "function",
+            "description": "Puts the assistant to sleep and ends the current session.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
+        },
+    ]
+
+    event = {
+        "type": "session.update",
+        "session": {
+            "model": settings.realtime_model,
+            "type": "realtime",
+            "audio": {
+                "input": {
+                    "format": {
+                        "type": "audio/pcm",
+                        "rate": 24000
+                    },
+                    "noise_reduction": {
+                        "type": "far_field"
+                    },
+                    "turn_detection": {
+                        "type": "semantic_vad",
+                        "create_response": True,
+                        "interrupt_response": False,
+                        "eagerness": "auto"
+                    },
+                    "transcription": None,
+                },
+                "output": {
+                    "format": {
+                        "type": "audio/pcm",
+                        "rate": 24000
+                    },
+                    "speed": 1,
+                    "voice": settings.agent_voice
+                }
+            },
+            "instructions": collect.TRAINING_PROMPT,
+            "output_modalities": ['audio'],
+            "tools": training_tools,
             "tool_choice": "auto",
         }
     }

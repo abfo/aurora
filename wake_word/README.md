@@ -72,6 +72,18 @@ python wake_word/scripts/record_samples.py --speaker kate --label positives --co
 python wake_word/scripts/record_samples.py --speaker kate --label hard_negatives --count 8
 ```
 
+**Collect samples by voice, on the device** - the running assistant can gather
+recordings on the actual Pi mic/room. Say *"Aurora, help me train you to recognize my
+voice."* Aurora asks who's training, explains the routine, then records 10 positives
+(lights all **green**) and 5 negatives (lights all **red**) - on Windows (`UI=Debug`)
+there are no lights, so it logs a `TRAINING: speak ... sample N/M now` cue instead.
+Clips are written to `wake_word/data/collected/positives/` and `.../negatives/` as
+`<name>_<uuid>.wav` (configurable via `WAKE_WORD_COLLECT_DIR`). The `<uuid>` means
+running it again never overwrites earlier clips, so the family can repeat it
+periodically. Nothing is trained automatically - gather/merge these into
+`data/positives` and `data/negatives` before training. The `<name>_` prefix keeps the
+speaker grouping working, same as `record_samples.py`.
+
 **Bootstrap with synthetic voices** (OpenAI TTS, uses your existing `OPENAI_API_KEY`;
 generates many voices of "Aurora", "Alexa" and general speech):
 

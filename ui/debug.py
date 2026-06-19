@@ -32,6 +32,14 @@ class DebugUI(AssistantUIBase):
         level = logging.DEBUG if text else logging.DEBUG
         self._log.log(level, "Timer text: %s", text if text else "<cleared>")
 
+    # Wake-word training cues (no lights on Windows; log a clear text cue)
+    def show_training_prompt(self, label: str, index: int, total: int) -> None:
+        kind = "POSITIVE" if label == "positives" else "NEGATIVE"
+        self._log.info("TRAINING: speak %s sample %d/%d now", kind, index, total)
+
+    def clear_training_lights(self) -> None:
+        self._log.info("TRAINING: (clip captured)")
+
     # User controls
     def is_cancel_pressed(self) -> bool:
         return False

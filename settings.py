@@ -67,6 +67,14 @@ class Settings(BaseSettings):
         validation_alias="WAKE_WORD_THRESHOLD",
     )
 
+    # Folder for guided ("Aurora, help me train you") wake-word recordings.
+    # Clips land in <dir>/positives and <dir>/negatives as <name>_<uuid>.wav.
+    wake_word_collect_dir: str = Field(
+        default="wake_word/data/collected",
+        description="Folder for guided wake-word training recordings (positives/ and negatives/ subfolders)",
+        validation_alias="WAKE_WORD_COLLECT_DIR",
+    )
+
     # OpenAI API key (read from env var OPENAI_API_KEY)
     openai_api_key: str = Field(
         default="",
