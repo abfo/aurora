@@ -88,6 +88,13 @@ class Settings(BaseSettings):
         validation_alias="AGENT_INSTRUCTIONS_PATH",
     )
 
+    # Realtime model selection (defaults to 'gpt-realtime-1.5')
+    realtime_model: str = Field(
+        default="gpt-realtime-1.5",
+        description="OpenAI realtime model to use (e.g., gpt-realtime-1.5)",
+        validation_alias="REALTIME_MODEL",
+    )
+
     # Agent voice selection (defaults to 'shimmer')
     agent_voice: str = Field(
         default="shimmer",
@@ -206,6 +213,23 @@ class Settings(BaseSettings):
         default="{}",
         description="JSON mapping of light names to LIFX light IDs (e.g., '{\"living room\": \"id:12345\", \"hallway\": \"label:Hall Light\"}')",
         validation_alias="LIFX_LIGHTS",
+    )
+
+    # Analytics (optional)
+    analytics_url: str | None = Field(
+        default=None,
+        description="URL endpoint for posting analytics events",
+        validation_alias="ANALYTICS_URL",
+    )
+    analytics_source: str | None = Field(
+        default=None,
+        description="Source identifier sent with analytics events",
+        validation_alias="ANALYTICS_SOURCE",
+    )
+    analytics_api_key: str | None = Field(
+        default=None,
+        description="API key for the analytics endpoint",
+        validation_alias="ANALYTICS_API_KEY",
     )
 
 

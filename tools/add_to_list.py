@@ -103,8 +103,9 @@ class AddToListTool(Tool):
                 details += f" Response: {resp_text}"
             return details
 
+        self.analytics.report_event(f"List Add {item_list}")    
         return f"{item_name} added to {item_list}"
 
 
-def create_tool(log: Optional[logging.Logger] = None, audio_manager: Any | None = None) -> Tool:
-    return AddToListTool(log=log, audio_manager=audio_manager)
+def create_tool(log: Optional[logging.Logger] = None, audio_manager: Any | None = None, **kwargs) -> Tool:
+    return AddToListTool(log=log, audio_manager=audio_manager, **kwargs)

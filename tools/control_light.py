@@ -150,8 +150,9 @@ class ControlLightTool(Tool):
             if response is not None:
                 response.close()
 
+        self.analytics.report_event("Light")    
         return f'{light_name} is now {light_state}'
 
 
-def create_tool(log: Optional[logging.Logger] = None, audio_manager: Any | None = None) -> Tool:
-    return ControlLightTool(log=log, audio_manager=audio_manager)
+def create_tool(log: Optional[logging.Logger] = None, audio_manager: Any | None = None, **kwargs) -> Tool:
+    return ControlLightTool(log=log, audio_manager=audio_manager, **kwargs)

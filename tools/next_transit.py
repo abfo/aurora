@@ -13,8 +13,8 @@ from .base import Tool
 class NextTransitTool(Tool):
     """Tool to fetch predicted arrival times for a configured public transit route using the Bay Area 511 API."""
 
-    def __init__(self, log: Optional[logging.Logger] = None, audio_manager: Any | None = None):
-        super().__init__(log=log, audio_manager=audio_manager)
+    def __init__(self, log: Optional[logging.Logger] = None, audio_manager: Any | None = None, **kwargs):
+        super().__init__(log=log, audio_manager=audio_manager, **kwargs)
         friendly = (settings.bay_area_511_friendly_name or "transit").strip()
         # sanitize for tool name
         sanitized = "".join(c.lower() if c.isalnum() else "_" for c in friendly).strip("_")
@@ -88,6 +88,7 @@ class NextTransitTool(Tool):
                 return f"No upcoming {self.friendly_name} arrivals found."
 
             rounded_times = [f"{round(m)}mins" for m in predicted_arrival_times]
+            self.analytics.report_event("Transit")    
             return ", ".join(rounded_times)
         except Exception as err:
             self.log.exception("Failed to get transit prediction")
@@ -97,5 +98,5 @@ class NextTransitTool(Tool):
                 response.close()
 
 
-def create_tool(log: Optional[logging.Logger] = None, audio_manager: Any | None = None) -> Tool:
-    return NextTransitTool(log=log, audio_manager=audio_manager)
+def create_tool(log: Optional[logging.Logger] = None, audio_manager: Any | None = None, **kwargs) -> Tool:
+    return NextTransitTool(log=log, audio_manager=audio_manager, **kwargs)
