@@ -12,6 +12,10 @@ with ``<speaker>_<uuid>.wav`` filenames. The speaker prefix lets the training
 dataset group train/val splits by voice (see prepare_dataset._speaker_group),
 and the uuid guarantees repeated sessions never overwrite earlier recordings.
 
+When wake-word training is enabled, runtime activations are also captured here
+via :func:`save_activation_clip` into ``<collect_dir>/activations`` (same format)
+to be reviewed later and sorted into positives/ or negatives/.
+
 Nothing is uploaded or trained automatically - the files are left on disk to be
 gathered and fed into ``wake_word/scripts/train.py`` manually.
 """
@@ -60,6 +64,7 @@ GAP_SECONDS = 0.6       # lights-off gap between clips so cues read as discrete
 # Subfolders under the collection dir; map to the training data layout.
 POSITIVE_LABEL = "positives"
 NEGATIVE_LABEL = "negatives"
+ACTIVATION_LABEL = "activations"
 
 
 def sanitize_speaker(name: str | None) -> str:
@@ -89,6 +94,20 @@ def _write_wav(path: str, pcm: bytes) -> None:
         wf.setsampwidth(2)  # int16
         wf.setframerate(config.SAMPLE_RATE)
         wf.writeframes(pcm)
+
+
+def save_activation_clip(pcm: bytes, collect_dir: str, log) -> str:
+    """Write one wake-word activation as a negative-candidate WAV under
+    ``<collect_dir>/activations``. Same 24 kHz mono int16 format as the guided
+    negatives; reviewed and sorted into positives/ or negatives/ manually. The
+    ``activation_`` prefix groups these consistently in train/val splits (see
+    prepare_dataset._speaker_group)."""
+    out_dir = os.path.join(collect_dir, ACTIVATION_LABEL)
+    os.makedirs(out_dir, exist_ok=True)
+    path = os.path.join(out_dir, f"activation_{uuid.uuid4().hex}.wav")
+    _write_wav(path, pcm)
+    log.info("Saved wake-word activation clip %s", path)
+    return path
 
 
 async def _capture_clip(frame_queue: asyncio.Queue) -> bytes:

@@ -235,6 +235,21 @@ async def _wait_for_wake_word(
             preroll.append(frame)
             samples = struct.unpack_from("h" * (len(frame) // 2), frame)
             if detector.process(samples) >= 0:
+                # When training is enabled, save the exact 1.2s window that fired
+                # as a negative-candidate clip (reviewed/sorted later). Guarded so
+                # a disk error never blocks waking. The buffer is already in
+                # memory, so this adds negligible latency before the handoff.
+                if settings.wake_word_training_enabled:
+                    try:
+                        pcm = detector.window_pcm_bytes()
+                        await asyncio.to_thread(
+                            collect.save_activation_clip,
+                            pcm,
+                            settings.wake_word_collect_dir,
+                            log,
+                        )
+                    except Exception as e:
+                        log.exception("Failed to save activation clip: %s", e)
                 # Replay the buffered lead-in (incl. the wake word) so the start
                 # of the utterance reaches the realtime session uncut. Any frames
                 # already queued are newer than the pre-roll, so re-insert the
@@ -499,24 +514,27 @@ async def _update_realtime_session(ws: websockets.ClientConnection, agent_instru
         }
     })
 
-    # always offer wake-word training. The description is the trigger: the model
-    # calls this when a user asks to help train/teach the assistant to recognize
-    # their voice or the wake word. Handling it swaps in the dedicated training
-    # prompt and tool set (see _enter_training_session).
-    all_tools.append({
-        "name": "start_wake_word_training",
-        "type": "function",
-        "description": (
-            "Start wake-word training. Call this when the user asks to help train or "
-            "teach Aurora to recognize their voice or the wake word (e.g. 'help me train "
-            "you to recognize my voice', 'train your wake word')."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {},
-            "required": []
-        }
-    })
+    # Offer wake-word training only when enabled (default off). The description
+    # is the trigger: the model calls this when a user asks to help train/teach
+    # the assistant to recognize their voice or the wake word. Handling it swaps
+    # in the dedicated training prompt and tool set (see _enter_training_session).
+    # Gating it here is the single control point that keeps the guided flow from
+    # ever starting when training is disabled.
+    if settings.wake_word_training_enabled:
+        all_tools.append({
+            "name": "start_wake_word_training",
+            "type": "function",
+            "description": (
+                "Start wake-word training. Call this when the user asks to help train or "
+                "teach Aurora to recognize their voice or the wake word (e.g. 'help me train "
+                "you to recognize my voice', 'train your wake word')."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
+        })
 
     ## if a recipe folder is configured add start/stop cooking tools
     recipe_tool = next((tool for tool in tools if tool.name == "list_recipes"), None)

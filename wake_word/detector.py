@@ -148,6 +148,11 @@ class WakeWordDetector:
             return 0
         return -1
 
+    def window_pcm_bytes(self) -> bytes:
+        """The current 1.2s analysis window as int16 PCM bytes. At a trigger
+        this is exactly the audio that fired the detector."""
+        return self._buffer.tobytes()
+
     def delete(self) -> None:
         self._session = None
 

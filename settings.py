@@ -75,6 +75,15 @@ class Settings(BaseSettings):
         validation_alias="WAKE_WORD_COLLECT_DIR",
     )
 
+    # Master switch for wake-word training. When false (default): no activation
+    # clips are saved and the guided "help me train you" tool is not offered to
+    # the assistant. See wake_word/README.md / .env.example.
+    wake_word_training_enabled: bool = Field(
+        default=False,
+        description="Enable wake-word training: save activation clips and offer the training tool",
+        validation_alias="WAKE_WORD_TRAINING_ENABLED",
+    )
+
     # OpenAI API key (read from env var OPENAI_API_KEY)
     openai_api_key: str = Field(
         default="",

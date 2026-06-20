@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "trained_at": "2026-06-19T10:56:07",
+  "trained_at": "2026-06-19T14:25:18",
   "threshold": 0.9,
   "features": {
     "sample_rate": 24000,
@@ -11,11 +11,11 @@
     "num_frames": 117
   },
   "metrics": {
-    "val_recall": 0.6972,
-    "val_false_alarm_rate": 0.0271,
-    "val_hard_negative_rate": 0.0538,
-    "val_loss": 0.471,
-    "num_windows": 8288,
-    "num_positive": 2401
+    "val_recall": 0.6182,
+    "val_false_alarm_rate": 0.0489,
+    "val_hard_negative_rate": 0.0447,
+    "val_loss": 0.519,
+    "num_windows": 6145,
+    "num_positive": 1865
   }
 }
