@@ -1,7 +1,7 @@
 {
   "version": 1,
-  "trained_at": "2026-06-21T09:49:17",
-  "threshold": 0.85,
+  "trained_at": "2026-06-22T17:36:28",
+  "threshold": 0.65,
   "features": {
     "sample_rate": 24000,
     "window_samples": 28800,
@@ -11,11 +11,11 @@
     "num_frames": 117
   },
   "metrics": {
-    "val_recall": 0.4559,
-    "val_false_alarm_rate": 0.0241,
-    "val_hard_negative_rate": 0.0321,
-    "val_loss": 0.4942,
-    "num_windows": 6510,
-    "num_positive": 1865
+    "val_recall": 0.498,
+    "val_false_alarm_rate": 0.0296,
+    "val_hard_negative_rate": 0.0438,
+    "val_loss": 0.5332,
+    "num_windows": 7160,
+    "num_positive": 2000
   }
 }
