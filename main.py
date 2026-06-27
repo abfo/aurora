@@ -444,6 +444,11 @@ async def run_realtime_conversation(
                             except Exception as e:
                                 log.exception(f"Error in tool {tool.name}: {e}")
 
+                    # Keep the UI timer display in sync in case a tool added/removed a
+                    # timer (e.g. delete_timer). Mirrors the resync done in the main/wake
+                    # loops; audio_to_text() returns "" when no timers remain.
+                    ui.set_timer_text(audio_manager.audio_to_text())
+
                     if output:
                         message = {
                             "type": "conversation.item.create",
