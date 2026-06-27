@@ -148,11 +148,6 @@ async def _run_assistant(
     input_stream = await _open_input_stream_async(audio, loop, frame_queue, lambda: mic_gate["capture"])
     input_stream.start_stream()
 
-    detector = WakeWordDetector(
-        settings.wake_word_model_path,
-        threshold=settings.wake_word_threshold,
-    )
-
     try:
         while True:
             # Play any due scheduled audio (timers/alarms) first.
@@ -168,7 +163,14 @@ async def _run_assistant(
             mic_gate["capture"] = True
             _drain_queue(frame_queue)
 
+            detector = WakeWordDetector(
+                settings.wake_word_model_path,
+                threshold=settings.wake_word_threshold,
+            )
+
             outcome = await _wait_for_wake_word(detector, frame_queue, audio_manager, ui, log)
+
+            detector.delete()
 
             if outcome == "shutdown":
                 log.info("User requested shutdown")
@@ -216,8 +218,6 @@ async def _run_assistant(
         if input_stream:
             input_stream.stop_stream()
             input_stream.close()
-        if detector:
-            detector.delete()
 
 async def _wait_for_wake_word(
         detector: WakeWordDetector,
