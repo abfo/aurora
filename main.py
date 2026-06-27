@@ -180,6 +180,7 @@ async def _run_assistant(
                 continue
 
             log.info("Wake word detected")
+            _drain_queue(frame_queue)
             # Show LISTENING immediately on wake so the user has feedback while
             # the realtime session connects in the background.
             ui.update_state(AssistantUIState.LISTENING, reason="Wake word detected")
