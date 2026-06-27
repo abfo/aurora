@@ -220,6 +220,19 @@ class Settings(BaseSettings):
         validation_alias="DEFAULT_TIMER_AUDIO_FILE",
     )
 
+    # Flash briefing podcast feed (optional; has a working default)
+    flash_briefing_url: str = Field(
+        default="https://podcasts.files.bbci.co.uk/p02nq0gn.rss",
+        description="RSS/podcast feed URL whose most recent episode is played as the flash briefing",
+        validation_alias="FLASH_BRIEFING_URL",
+    )
+    # Seconds to skip from the start of the briefing (e.g. to cut a fixed intro).
+    flash_briefing_trim_seconds: int = Field(
+        default=65,
+        description="Number of seconds to skip from the start of the flash briefing audio",
+        validation_alias="FLASH_BRIEFING_TRIM_SECONDS",
+    )
+
     # LIFX smart light control (optional)
     lifx_auth_token: str = Field(
         default="",
