@@ -144,6 +144,9 @@ async def _run_assistant(
     # mic_gate controls whether the callback enqueues frames. Off while the
     # assistant is talking (avoids it hearing itself) and during alarm playback.
     mic_gate = {"capture": True}
+    # Tracks whether the training control has been released since it last fired,
+    # so holding it down doesn't chain training sessions back to back.
+    train_gate = {"armed": True}
 
     input_stream = await _open_input_stream_async(audio, loop, frame_queue, lambda: mic_gate["capture"])
     input_stream.start_stream()
@@ -168,22 +171,26 @@ async def _run_assistant(
                 threshold=settings.wake_word_threshold,
             )
 
-            outcome = await _wait_for_wake_word(detector, frame_queue, audio_manager, ui, log)
+            outcome = await _wait_for_wake_word(detector, frame_queue, audio_manager, ui, train_gate, log)
 
             detector.delete()
 
             if outcome == "shutdown":
                 log.info("User requested shutdown")
                 break
-            if outcome != "woke":
+            if outcome not in ("woke", "train"):
                 # due_audio or transient error: loop back to play audio / retry.
                 continue
 
-            log.info("Wake word detected")
+            # "train" skips the wake word entirely and opens the session straight
+            # into training mode; everything downstream is otherwise identical.
+            training_mode = outcome == "train"
+            reason = "Training requested" if training_mode else "Wake word detected"
+            log.info(reason)
             _drain_queue(frame_queue)
             # Show LISTENING immediately on wake so the user has feedback while
             # the realtime session connects in the background.
-            ui.update_state(AssistantUIState.LISTENING, reason="Wake word detected")
+            ui.update_state(AssistantUIState.LISTENING, reason=reason)
             # Hand the live queue to the conversation. Frames captured from here
             # on (including during connect) are buffered and sent once connected.
             action = await run_realtime_conversation(
@@ -195,7 +202,8 @@ async def _run_assistant(
                 tools,
                 audio_manager,
                 ui,
-                analytics
+                analytics,
+                training_mode
             )
 
             # The conversation may ask us to run wake-word training capture once
@@ -225,10 +233,15 @@ async def _wait_for_wake_word(
         frame_queue: asyncio.Queue,
         audio_manager: AudioManager,
         ui: AssistantUIBase,
+        train_gate: dict,
         log: logging.Logger) -> str:
     """Consume mic frames and feed the detector until the wake word fires.
 
-    Returns one of: "woke", "shutdown", "due_audio", "error".
+    Returns one of: "woke", "train", "shutdown", "due_audio", "error".
+
+    "train" means the user asked for wake-word training from the UI (joystick
+    up) rather than by speaking to Aurora. ``train_gate`` carries the pressed/
+    released state across calls - see the arming logic below.
     """
     next_timer_update = datetime.now() + timedelta(seconds=1)
     preroll: deque[bytes] = deque(maxlen=_WAKE_PREROLL_FRAMES)
@@ -270,6 +283,19 @@ async def _wait_for_wake_word(
                 return "woke"
             if ui.is_shutdown_pressed():
                 return "shutdown"
+            # Joystick up starts wake-word training directly, skipping the wake
+            # word and the spoken request. Gated on the same master switch as
+            # the start_wake_word_training tool so a stray nudge does nothing on
+            # a normal build.
+            train_pressed = settings.wake_word_training_enabled and ui.is_train_pressed()
+            if not train_pressed:
+                # Only re-arm once the control has been seen released. These are
+                # undebounced level reads, so without this a joystick still held
+                # when capture finishes would immediately start another session.
+                train_gate["armed"] = True
+            elif train_gate["armed"]:
+                train_gate["armed"] = False
+                return "train"
             if audio_manager.has_due_audio():
                 return "due_audio"
             if datetime.now() > next_timer_update:
@@ -290,7 +316,8 @@ async def run_realtime_conversation(
         tools: list[Tool],
         audio_manager: AudioManager,
         ui: AssistantUIBase,
-        analytics: Analytics):
+        analytics: Analytics,
+        training_mode: bool = False):
     watchdog_task = None
     due_audio_task = None
     send_audio_task = None
@@ -306,7 +333,7 @@ async def run_realtime_conversation(
     mic_gate["capture"] = True
     watchdog_control = {"reset_event": asyncio.Event()}
 
-    connect_task = asyncio.create_task(_connect_realtime(agent_instructions, tools))
+    connect_task = asyncio.create_task(_connect_realtime(agent_instructions, tools, training_mode))
     output_stream_task = asyncio.create_task(_open_output_stream_async(audio))
 
     log.info("Connecting to OpenAI Realtime API and opening output stream...")
@@ -325,6 +352,8 @@ async def run_realtime_conversation(
     log.info("Ready for conversation.")
 
     analytics.report_event("Conversation")
+    if training_mode:
+        analytics.report_event("WakeWordTraining")
 
     try:
         while True:
@@ -573,7 +602,16 @@ async def _update_realtime_session(ws: websockets.ClientConnection, agent_instru
             }
         })
 
-    event = {
+    await ws.send(json.dumps(_session_event(full_instructions, all_tools)))
+
+def _session_event(instructions: str, tools: list[dict]) -> dict:
+    """Build a session.update payload.
+
+    The model and audio configuration is identical for every mode Aurora runs
+    in - only the instructions and the tool list change - so both the normal
+    session and the wake-word training session are built from here.
+    """
+    return {
         "type": "session.update",
         "session": {
             "model": settings.realtime_model,
@@ -604,13 +642,12 @@ async def _update_realtime_session(ws: websockets.ClientConnection, agent_instru
                     "voice": settings.agent_voice
                 }
             },
-            "instructions": full_instructions,
+            "instructions": instructions,
             "output_modalities": ['audio'],
-            "tools": all_tools,
+            "tools": tools,
             "tool_choice": "auto",
         }
     }
-    await ws.send(json.dumps(event))
 
 async def _enter_training_session(ws: websockets.ClientConnection):
     """Swap the live session into wake-word training mode.
@@ -626,8 +663,8 @@ async def _enter_training_session(ws: websockets.ClientConnection):
             "name": "begin_wake_word_capture",
             "type": "function",
             "description": (
-                "Begin recording the wake-word training clips. Call this once the user "
-                "has given their name and is ready to start saying the words."
+                "Begin recording the wake-word training clips. Call this as soon as the "
+                "user has given their name and you have told them the rules."
             ),
             "parameters": {
                 "type": "object",
@@ -652,46 +689,9 @@ async def _enter_training_session(ws: websockets.ClientConnection):
         },
     ]
 
-    event = {
-        "type": "session.update",
-        "session": {
-            "model": settings.realtime_model,
-            "type": "realtime",
-            "audio": {
-                "input": {
-                    "format": {
-                        "type": "audio/pcm",
-                        "rate": 24000
-                    },
-                    "noise_reduction": {
-                        "type": "far_field"
-                    },
-                    "turn_detection": {
-                        "type": "semantic_vad",
-                        "create_response": True,
-                        "interrupt_response": False,
-                        "eagerness": "auto"
-                    },
-                    "transcription": None,
-                },
-                "output": {
-                    "format": {
-                        "type": "audio/pcm",
-                        "rate": 24000
-                    },
-                    "speed": 1,
-                    "voice": settings.agent_voice
-                }
-            },
-            "instructions": collect.TRAINING_PROMPT,
-            "output_modalities": ['audio'],
-            "tools": training_tools,
-            "tool_choice": "auto",
-        }
-    }
-    await ws.send(json.dumps(event))
+    await ws.send(json.dumps(_session_event(collect.TRAINING_PROMPT, training_tools)))
 
-async def _connect_realtime(agent_instructions: str, tools: list[Tool]):
+async def _connect_realtime(agent_instructions: str, tools: list[Tool], training_mode: bool = False):
     additional_headers = {
         "Authorization": f"Bearer {settings.openai_api_key}"
     }
@@ -703,7 +703,17 @@ async def _connect_realtime(agent_instructions: str, tools: list[Tool]):
         ping_timeout=_WS_PING_TIMEOUT_SECONDS
     )
     
-    await _update_realtime_session(ws, agent_instructions, "", tools)
+    if training_mode:
+        # Started from the UI rather than the wake word, so open straight into
+        # training mode instead of the normal prompt.
+        await _enter_training_session(ws)
+        # Nothing was spoken to get here, so semantic VAD has nothing to react
+        # to. Ask for the first response explicitly, otherwise Aurora sits
+        # silent instead of asking who is training. (The voice route doesn't
+        # need this - the start_wake_word_training tool output triggers one.)
+        await ws.send(json.dumps({"type": "response.create"}))
+    else:
+        await _update_realtime_session(ws, agent_instructions, "", tools)
 
     return ws
 

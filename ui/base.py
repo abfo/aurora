@@ -111,6 +111,15 @@ class AssistantUIBase(ABC):
         """
 
     # -------------------- User controls --------------------
+    def is_train_pressed(self) -> bool:
+        """Return True if the start-training control is currently pressed.
+
+        Only polled while idle (waiting for the wake word) and only when
+        wake-word training is enabled, so it is an optional capability rather
+        than an abstract requirement. Default is never pressed.
+        """
+        return False
+
     @abstractmethod
     def is_cancel_pressed(self) -> bool:
         """Return True if the cancel button is currently pressed."""

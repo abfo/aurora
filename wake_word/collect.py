@@ -1,10 +1,11 @@
 """Guided, in-app collection of wake-word training samples.
 
-This module powers the voice-driven "help me train you to recognize my voice"
-flow. It holds the dedicated training-mode prompt (swapped into the realtime
-session so the small model stays tightly on-script), plus the routine that
-records positive ("Aurora") and negative ("Alexa" / general speech) clips from
-the already-open mic stream and writes them to disk for later training.
+This module powers the guided training flow, reached either by asking Aurora to
+"help me train you to recognize my voice" or by pushing the joystick up while
+she is asleep. It holds the dedicated training-mode prompt (swapped into the
+realtime session so the small model stays tightly on-script), plus the routine
+that records positive ("Aurora") and negative (any other word) clips from the
+already-open mic stream and writes them to disk for later training.
 
 Clips are saved as 24 kHz mono int16 WAV (matching wake_word/config and the
 training pipeline) to ``<collect_dir>/positives`` and ``<collect_dir>/negatives``
@@ -32,25 +33,18 @@ from wake_word import config
 # Prompt that fully replaces Aurora's normal instructions while training mode is
 # active. Kept short and imperative because the realtime model is not very smart
 # and must stay on-script.
-TRAINING_PROMPT = """You are Aurora, a friendly cartoon squid home assistant, now in WAKE WORD TRAINING MODE.
+TRAINING_PROMPT = """You are Aurora, a friendly cartoon squid home assistant, now in WAKE WORD
+TRAINING MODE. Be quick: two short turns, then start recording.
 
-Your ONLY job right now is to collect a short set of voice recordings to help you
-better recognize when someone says your name. Do not answer unrelated questions or
-get sidetracked - if the user asks for anything else, gently steer them back to
-training (or, if they clearly want to stop, call go_to_sleep).
+Turn 1: One short greeting and ask for their first name. Nothing else.
 
-Follow these steps:
-1. Ask who is doing the training and capture their first name.
-2. Briefly explain the routine, in your own voice:
-   - They will say "Aurora" or "Hey Aurora" 10 times. The lights turn GREEN each
-     time - say it once after each green flash.
-   - Then they will say a different phrase like "Alexa" or "What's up" 5 times. The
-     lights turn RED each time - say it once after each red flash.
-   - Tell them you will go quiet while recording and will wake up again when it's
-     done, and to just watch the lights and speak right after each colour change.
-3. When they confirm they are ready, call begin_wake_word_capture with their name.
+Turn 2: The moment they give you a name, say one short sentence with the rules - after
+each GREEN light say "Aurora", after each RED light say any random word. Then say "here
+we go" and immediately call begin_wake_word_capture with their name.
 
-Keep it warm but brief. Do not narrate that you are calling a tool."""
+Do not ask if they are ready. Do not explain how long it takes or that you will go quiet.
+Do not answer unrelated questions - if they clearly want to stop, call go_to_sleep. Do not
+narrate that you are calling a tool."""
 
 # How many of each kind of clip to capture per session.
 POSITIVE_COUNT = 10

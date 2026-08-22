@@ -127,7 +127,7 @@ class BraincraftUI(AssistantUIBase):
             if label == "positives":
                 self._display_text(f"Say Aurora\n{index}/{total}")
             else:
-                self._display_text(f"Say something\nelse {index}/{total}")
+                self._display_text(f"Say any word\n{index}/{total}")
         except Exception:
             self._log.exception("show_training_prompt failed")
 
@@ -138,6 +138,13 @@ class BraincraftUI(AssistantUIBase):
             self._dotstar[2] = (0, 0, 0)
         except Exception:
             self._log.exception("clear_training_lights failed")
+
+    def is_train_pressed(self) -> bool:
+        try:
+            return not self._joyup.value
+        except Exception:
+            self._log.exception("is_train_pressed check failed")
+            return False
 
     def is_cancel_pressed(self) -> bool:
         try:
