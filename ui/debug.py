@@ -12,7 +12,6 @@ except ImportError:  # pragma: no cover - non-Windows debug runs
 # Arrow keys arrive from msvcrt as a two-character sequence: a prefix byte
 # followed by a letter identifying the direction.
 _ARROW_PREFIXES = ("\x00", "\xe0")
-_ARROW_UP = "H"
 _ARROW_DOWN = "P"
 
 
@@ -20,10 +19,10 @@ class DebugUI(AssistantUIBase):
     """Debug implementation of the Assistant UI.
 
     Logs state transitions and timer text updates via the project's logging
-    infrastructure. Console keys stand in for the Braincraft joystick so the
-    same flows can be exercised on Windows: up arrow starts wake-word training
-    (joystick up), down arrow shuts down (joystick down), Enter cancels
-    (joystick press).
+    infrastructure. Console keys stand in for the Braincraft controls so the
+    same flows can be exercised on Windows: Enter is the joystick press, which
+    cancels during playback and starts wake-word training while idle, and down
+    arrow shuts down (joystick down).
     """
 
     def __init__(self, logger: logging.Logger | None = None) -> None:
@@ -35,7 +34,7 @@ class DebugUI(AssistantUIBase):
         # consumes it, instead of racing over a single "last key" value.
         self._pending: set[str] = set()
         if msvcrt:
-            self._log.info("Debug UI keys: up=train, down=shutdown, enter=cancel")
+            self._log.info("Debug UI keys: enter=cancel/train, down=shutdown")
         else:
             self._log.info("Debug UI keyboard controls unavailable on this platform")
 
@@ -63,15 +62,17 @@ class DebugUI(AssistantUIBase):
     def clear_training_lights(self) -> None:
         self._log.info("TRAINING: (clip captured)")
 
-    # User controls
+    # User controls. Enter is one button with two jobs, mirroring the joystick
+    # press on the Braincraft: cancel during playback, start training while
+    # idle. Only one of the two is ever polled at a time, so they can share it.
     def is_train_pressed(self) -> bool:
-        return self._take("train")
+        return self._take("button", "train")
 
     def is_cancel_pressed(self) -> bool:
-        return self._take("cancel")
+        return self._take("button", "cancel")
 
     def is_shutdown_pressed(self) -> bool:
-        return self._take("shutdown")
+        return self._take("shutdown", "shutdown")
 
     # Lifecycle
     def shutdown(self) -> None:
@@ -90,21 +91,22 @@ class DebugUI(AssistantUIBase):
                     # Second half of an arrow-key sequence identifies which one.
                     if not msvcrt.kbhit():
                         continue
-                    code = msvcrt.getwch()
-                    if code == _ARROW_UP:
-                        self._pending.add("train")
-                    elif code == _ARROW_DOWN:
+                    if msvcrt.getwch() == _ARROW_DOWN:
                         self._pending.add("shutdown")
                 elif ch in ("\r", "\n"):
-                    self._pending.add("cancel")
+                    self._pending.add("button")
         except Exception:
             self._log.exception("Keyboard poll failed")
 
-    def _take(self, action: str) -> bool:
-        """Poll the console, then consume one pending press of ``action``."""
+    def _take(self, key: str, action: str) -> bool:
+        """Poll the console, then consume one pending press of ``key``.
+
+        ``action`` only labels the log line - it says what the press means in
+        the current phase, since one key can drive more than one action.
+        """
         self._poll_keys()
-        if action in self._pending:
-            self._pending.discard(action)
+        if key in self._pending:
+            self._pending.discard(key)
             self._log.info("Debug UI key: %s", action)
             return True
         return False

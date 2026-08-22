@@ -1,8 +1,8 @@
 """Guided, in-app collection of wake-word training samples.
 
 This module powers the guided training flow, reached either by asking Aurora to
-"help me train you to recognize my voice" or by pushing the joystick up while
-she is asleep. It holds the dedicated training-mode prompt (swapped into the
+"help me train you to recognize my voice" or by pressing the joystick button
+while she is asleep. It holds the dedicated training-mode prompt (swapped into the
 realtime session so the small model stays tightly on-script), plus the routine
 that records positive ("Aurora") and negative (any other word) clips from the
 already-open mic stream and writes them to disk for later training.

@@ -117,6 +117,10 @@ class AssistantUIBase(ABC):
         Only polled while idle (waiting for the wake word) and only when
         wake-word training is enabled, so it is an optional capability rather
         than an abstract requirement. Default is never pressed.
+
+        This may report the same physical control as is_cancel_pressed: the two
+        are polled in mutually exclusive phases (cancel only during a session or
+        alarm playback, training only while idle), so one button can serve both.
         """
         return False
 

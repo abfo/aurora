@@ -144,9 +144,6 @@ async def _run_assistant(
     # mic_gate controls whether the callback enqueues frames. Off while the
     # assistant is talking (avoids it hearing itself) and during alarm playback.
     mic_gate = {"capture": True}
-    # Tracks whether the training control has been released since it last fired,
-    # so holding it down doesn't chain training sessions back to back.
-    train_gate = {"armed": True}
 
     input_stream = await _open_input_stream_async(audio, loop, frame_queue, lambda: mic_gate["capture"])
     input_stream.start_stream()
@@ -171,7 +168,7 @@ async def _run_assistant(
                 threshold=settings.wake_word_threshold,
             )
 
-            outcome = await _wait_for_wake_word(detector, frame_queue, audio_manager, ui, train_gate, log)
+            outcome = await _wait_for_wake_word(detector, frame_queue, audio_manager, ui, log)
 
             detector.delete()
 
@@ -233,18 +230,20 @@ async def _wait_for_wake_word(
         frame_queue: asyncio.Queue,
         audio_manager: AudioManager,
         ui: AssistantUIBase,
-        train_gate: dict,
         log: logging.Logger) -> str:
     """Consume mic frames and feed the detector until the wake word fires.
 
     Returns one of: "woke", "train", "shutdown", "due_audio", "error".
 
-    "train" means the user asked for wake-word training from the UI (joystick
-    up) rather than by speaking to Aurora. ``train_gate`` carries the pressed/
-    released state across calls - see the arming logic below.
+    "train" means the user asked for wake-word training from the UI (the
+    joystick button) rather than by speaking to Aurora.
     """
     next_timer_update = datetime.now() + timedelta(seconds=1)
     preroll: deque[bytes] = deque(maxlen=_WAKE_PREROLL_FRAMES)
+    # The training button is the same one that cancels a session or an alarm, so
+    # it may well still be held when we arrive here. Start disarmed: a press only
+    # counts once the button has been seen released during this idle period.
+    train_armed = False
     while True:
         try:
             frame = await frame_queue.get()
@@ -283,18 +282,18 @@ async def _wait_for_wake_word(
                 return "woke"
             if ui.is_shutdown_pressed():
                 return "shutdown"
-            # Joystick up starts wake-word training directly, skipping the wake
-            # word and the spoken request. Gated on the same master switch as
-            # the start_wake_word_training tool so a stray nudge does nothing on
-            # a normal build.
+            # The joystick button starts wake-word training directly, skipping
+            # the wake word and the spoken request. Gated on the same master
+            # switch as the start_wake_word_training tool so a stray press does
+            # nothing on a normal build.
             train_pressed = settings.wake_word_training_enabled and ui.is_train_pressed()
             if not train_pressed:
-                # Only re-arm once the control has been seen released. These are
-                # undebounced level reads, so without this a joystick still held
-                # when capture finishes would immediately start another session.
-                train_gate["armed"] = True
-            elif train_gate["armed"]:
-                train_gate["armed"] = False
+                # Arm on release. These are undebounced level reads, so without
+                # this a button still held from cancelling an alarm - or from the
+                # press that ended the last capture - would fire straight away.
+                train_armed = True
+            elif train_armed:
+                train_armed = False
                 return "train"
             if audio_manager.has_due_audio():
                 return "due_audio"
