@@ -14,25 +14,41 @@ from wake_word.detector import WakeWordDetector
 from wake_word import collect
 import pyaudio
 import asyncio
-import websockets
 from tools.base import load_plugins, Tool
 from analytics import Analytics
 from audio_manager import AudioManager, ScheduledAudio
 from ui.base import AssistantUIBase, AssistantUIState
+from live_session import LiveSession, connect_live_session, LIVE_SAMPLERATE
+from backend_agent import (
+    BackendAgent,
+    TranscriptBuffer,
+    MODE_COOKING,
+    MODE_NORMAL,
+    MODE_TRAINING,
+)
 
 _AUDIO_PLAYBACK_CHUNK = 1024
-_REALTIME_SAMPLERATE = 24000
-_REALTIME_FRAMESPERBUFFER = 4096
+_OUTPUT_FRAMESPERBUFFER = 4096
 # Smaller input buffer (~43 ms @ 24 kHz) so wake-word detection stays responsive
-# and post-wake audio is buffered at fine granularity for the realtime handoff.
+# and post-wake audio is buffered at fine granularity for the handoff to GPT-Live.
 _INPUT_FRAMESPERBUFFER = 1024
 # Seconds of audio kept before the wake word fires and replayed into the session
 # so the start of the utterance ("Aurora when is...") is never clipped.
 _WAKE_PREROLL_SECONDS = 0.8
-_WAKE_PREROLL_FRAMES = int(_WAKE_PREROLL_SECONDS * _REALTIME_SAMPLERATE / _INPUT_FRAMESPERBUFFER)
-_WS_PING_INTERVAL_SECONDS = 30
-_WS_PING_TIMEOUT_SECONDS = 25
-_REALTIME_WATCHDOG_TIMEOUT_SECONDS = 120
+_WAKE_PREROLL_FRAMES = int(_WAKE_PREROLL_SECONDS * LIVE_SAMPLERATE / _INPUT_FRAMESPERBUFFER)
+# How long the playback queue must stay empty before an action that ends the
+# session (sleep, or a switch into cooking or training) is acted on, so Aurora is
+# never cut off mid-word. GPT-Live has no end-of-speech event to wait for.
+_PLAYBACK_QUIET_SECONDS = 1.2
+# Cap on that wait, in case speech keeps trickling in.
+_SLEEP_GRACE_SECONDS = 8.0
+# How long to give Aurora to start speaking a result before accepting that this
+# one is silent. The backend usually decides to sleep in the same breath as it
+# reports the result, so at that point she has not started talking yet.
+_SPEECH_START_GRACE_SECONDS = 3.0
+# Hold the TALKING state across short gaps between audio chunks so the UI does
+# not flicker between talking and listening mid-sentence.
+_TALK_HOLD_SECONDS = 0.5
 
 _COOKING_INSTRUCTIONS = """
 
@@ -77,6 +93,9 @@ def main():
     analytics = Analytics()
     tools = load_plugins(log=log, audio_manager=audio_manager, analytics=analytics)
 
+    # Two prompts, because GPT-Live splits the job in two: the live prompt is the
+    # voice (persona, speaking style, when to delegate), the backend prompt is the
+    # agent that actually runs the tools.
     agent_instructions = "You are a helpful assistant."
     if settings.agent_instructions_path:
         try:
@@ -85,6 +104,18 @@ def main():
                 log.info(f"Loaded agent instructions from {settings.agent_instructions_path}")
         except FileNotFoundError:
             log.warning(f"Agent instructions file not found: {settings.agent_instructions_path}")
+
+    backend_instructions = (
+        "You are the backend task handler for a voice assistant. Call a tool whenever one fits "
+        "the request, and reply with one short sentence for the assistant to say out loud."
+    )
+    if settings.backend_instructions_path:
+        try:
+            with open(settings.backend_instructions_path, "r") as f:
+                backend_instructions = f.read()
+                log.info(f"Loaded backend instructions from {settings.backend_instructions_path}")
+        except FileNotFoundError:
+            log.warning(f"Backend instructions file not found: {settings.backend_instructions_path}")
 
     ui.update_state(AssistantUIState.LOAD_DISPLAY, reason="Display initialized")
 
@@ -95,10 +126,11 @@ def main():
         ui.update_state(AssistantUIState.LOAD_AUDIO, reason="Audio initialized")
 
         # Run the assistant: one persistent mic stream feeds wake-word detection
-        # while sleeping and the realtime session while talking (see _run_assistant).
+        # while sleeping and the GPT-Live session while talking (see _run_assistant).
         asyncio.run(_run_assistant(
             audio,
             agent_instructions,
+            backend_instructions,
             log,
             tools,
             audio_manager,
@@ -126,23 +158,26 @@ def _drain_queue(q: asyncio.Queue) -> None:
 async def _run_assistant(
         audio: pyaudio.PyAudio,
         agent_instructions: str,
+        backend_instructions: str,
         log: logging.Logger,
         tools: list[Tool],
         audio_manager: AudioManager,
         ui: AssistantUIBase,
         analytics: Analytics):
     """Own a single always-open mic stream and alternate between listening for
-    the wake word and running a realtime conversation.
+    the wake word and running a GPT-Live conversation.
 
     The same stream and frame queue are used throughout, so audio spoken right
-    after the wake word (while the realtime websocket is still connecting) is
-    buffered in the queue and flushed once the session is ready - no gap, and
-    no closing/reopening of the input stream.
+    after the wake word (while the websocket is still connecting) is buffered in
+    the queue and flushed once the session is ready - no gap, and no
+    closing/reopening of the input stream. The same buffering covers the
+    reconnect when a session switches mode.
     """
     loop = asyncio.get_running_loop()
     frame_queue: asyncio.Queue[bytes] = asyncio.Queue()
-    # mic_gate controls whether the callback enqueues frames. Off while the
-    # assistant is talking (avoids it hearing itself) and during alarm playback.
+    # mic_gate controls whether the callback enqueues frames. It stays on for the
+    # whole conversation - GPT-Live handles interruptions itself - and is only
+    # closed while an alarm is playing or training clips are being recorded.
     mic_gate = {"capture": True}
 
     input_stream = await _open_input_stream_async(audio, loop, frame_queue, lambda: mic_gate["capture"])
@@ -186,40 +221,58 @@ async def _run_assistant(
             log.info(reason)
             _drain_queue(frame_queue)
             # Show LISTENING immediately on wake so the user has feedback while
-            # the realtime session connects in the background.
+            # the GPT-Live session connects in the background.
             ui.update_state(AssistantUIState.LISTENING, reason=reason)
             # Hand the live queue to the conversation. Frames captured from here
             # on (including during connect) are buffered and sent once connected.
-            action = await run_realtime_conversation(
-                audio,
-                frame_queue,
-                mic_gate,
-                agent_instructions,
-                log,
-                tools,
-                audio_manager,
-                ui,
-                analytics,
-                training_mode
-            )
+            #
+            # A conversation runs until GPT-Live closes, and may hand back an
+            # action. Cooking and training need a different live prompt, and that
+            # prompt is fixed at session.start, so those actions are served by
+            # opening the next session here rather than reconfiguring this one.
+            plan = _training_plan() if training_mode else _normal_plan(agent_instructions)
+            while plan is not None:
+                action = await run_conversation(
+                    audio,
+                    frame_queue,
+                    mic_gate,
+                    log,
+                    tools,
+                    audio_manager,
+                    ui,
+                    analytics,
+                    backend_instructions,
+                    plan
+                )
 
-            # The conversation may ask us to run wake-word training capture once
-            # the session has ended (it needs the mic stream / UI we own here).
-            if action and action.get("action") == "train_wake_word":
-                ui.update_state(AssistantUIState.TOOL_CALLING, reason="Wake word training")
-                try:
-                    await collect.collect_training_samples(
-                        frame_queue,
-                        mic_gate,
-                        ui,
-                        action.get("name", ""),
-                        log,
-                        collect_dir=settings.wake_word_collect_dir,
-                    )
-                except Exception as e:
-                    log.exception("Wake word training capture failed: %s", e)
-                # Fall through; the loop returns to SLEEPING and re-arms the wake
-                # word, and the next conversation uses the normal prompt again.
+                next_plan = None
+                kind = (action or {}).get("action")
+
+                if kind == "train":
+                    next_plan = _training_plan()
+                elif kind == "cook":
+                    next_plan = _cooking_plan(agent_instructions, action.get("recipe", ""))
+                elif kind == "stop_cooking":
+                    next_plan = _normal_plan(agent_instructions)
+                elif kind == "capture":
+                    # Recording needs the mic stream and the UI owned here, so it
+                    # runs between sessions rather than inside one.
+                    ui.update_state(AssistantUIState.TOOL_CALLING, reason="Wake word training")
+                    try:
+                        await collect.collect_training_samples(
+                            frame_queue,
+                            mic_gate,
+                            ui,
+                            action.get("name", ""),
+                            log,
+                            collect_dir=settings.wake_word_collect_dir,
+                        )
+                    except Exception as e:
+                        log.exception("Wake word training capture failed: %s", e)
+                    # Fall through; the loop returns to SLEEPING and re-arms the
+                    # wake word with the normal prompt again.
+
+                plan = next_plan
     finally:
         if input_stream:
             input_stream.stop_stream()
@@ -266,7 +319,7 @@ async def _wait_for_wake_word(
                     except Exception as e:
                         log.exception("Failed to save activation clip: %s", e)
                 # Replay the buffered lead-in (incl. the wake word) so the start
-                # of the utterance reaches the realtime session uncut. Any frames
+                # of the utterance reaches the live session uncut. Any frames
                 # already queued are newer than the pre-roll, so re-insert the
                 # pre-roll first, then those, to preserve chronological order.
                 newer = []
@@ -306,488 +359,421 @@ async def _wait_for_wake_word(
             await asyncio.sleep(5)
             return "error"
 
-async def run_realtime_conversation(
+def _normal_plan(agent_instructions: str) -> dict:
+    """Aurora as usual: the full live prompt and every configured tool."""
+    return {"mode": MODE_NORMAL, "instructions": agent_instructions, "opening": None}
+
+
+def _cooking_plan(agent_instructions: str, recipe: str) -> dict:
+    """Cooking mode, with the recipe baked into the live prompt.
+
+    The recipe goes to the voice model rather than the backend because stepping
+    the user through it is conversation, not a task - the backend keeps the
+    tools it needs for timers along the way.
+    """
+    return {
+        "mode": MODE_COOKING,
+        "instructions": f"{agent_instructions}{_COOKING_INSTRUCTIONS}{recipe}",
+        "opening": (
+            "Cooking mode has started. Say one short line, then take the user "
+            "through the first step of the recipe."
+        ),
+    }
+
+
+def _training_plan() -> dict:
+    """Wake-word training, on the dedicated short prompt and a tiny tool set."""
+    return {
+        "mode": MODE_TRAINING,
+        "instructions": collect.TRAINING_PROMPT,
+        "opening": (
+            "Wake word training has started. Greet the user in one short line "
+            "and ask for their first name."
+        ),
+    }
+
+
+class _Playback:
+    """Assistant speech, queued here and written to the output stream.
+
+    GPT-Live streams speech as audio deltas with no end-of-speech event and no
+    timing, so whether Aurora is still talking is something the client has to
+    work out for itself. This is where that is known: the idle timer, the UI
+    state and the optional mic mute all read it from here.
+    """
+
+    def __init__(self, stream, log: logging.Logger):
+        self._stream = stream
+        self._log = log
+        self._queue: asyncio.Queue = asyncio.Queue()
+        self._task: asyncio.Task | None = None
+        self._writing = False
+        self._quiet_since = time.monotonic()
+
+    def start(self) -> None:
+        self._task = asyncio.create_task(self._run())
+
+    def enqueue(self, pcm: bytes) -> None:
+        self._queue.put_nowait(pcm)
+
+    def clear(self) -> None:
+        """Drop anything not yet played (cancel button, session ending)."""
+        try:
+            while True:
+                self._queue.get_nowait()
+        except asyncio.QueueEmpty:
+            pass
+
+    @property
+    def speaking(self) -> bool:
+        return self._writing or not self._queue.empty()
+
+    def quiet_for(self) -> float:
+        """Seconds since the last chunk was played; 0 while still speaking."""
+        if self.speaking:
+            return 0.0
+        return time.monotonic() - self._quiet_since
+
+    async def _run(self) -> None:
+        while True:
+            pcm = await self._queue.get()
+            if pcm is None:
+                return
+            self._writing = True
+            try:
+                await asyncio.to_thread(self._stream.write, pcm)
+            except Exception:
+                self._log.debug("Dropped a playback chunk", exc_info=True)
+            finally:
+                self._writing = False
+                if self._queue.empty():
+                    self._quiet_since = time.monotonic()
+
+    async def stop(self) -> None:
+        """Stop playing and let the writer finish, before the stream closes."""
+        if self._task is None:
+            return
+        self.clear()
+        self._queue.put_nowait(None)
+        try:
+            await asyncio.wait_for(self._task, timeout=2)
+        except Exception:
+            self._task.cancel()
+        self._task = None
+
+
+async def run_conversation(
         audio: pyaudio.PyAudio,
         frame_queue: asyncio.Queue,
         mic_gate: dict,
-        agent_instructions: str,
         log: logging.Logger,
         tools: list[Tool],
         audio_manager: AudioManager,
         ui: AssistantUIBase,
         analytics: Analytics,
-        training_mode: bool = False):
-    watchdog_task = None
-    due_audio_task = None
-    send_audio_task = None
+        backend_instructions: str,
+        plan: dict):
+    """Run one GPT-Live session to completion and return what to do next.
+
+    ``plan`` carries the live prompt the session opens with and the mode the
+    backend agent runs in (see the _*_plan helpers). The session ends when the
+    backend asks it to, when a timer comes due, when the user presses cancel, or
+    when nobody has said anything for a while; the action it ends on is returned
+    to the caller, which may open the next session.
+    """
+    session = None
     output_stream = None
-    ws = None
-    # Optional action for the outer loop to run after this session ends (e.g.
-    # wake-word training capture). None means just go back to sleep.
-    post_action = None
+    playback = None
+    tasks: list[asyncio.Task] = []
+    # Filled in by the delegation handler with the action this session ends on.
+    outcome: dict = {}
+    # Delegations in flight. The idle timer must not close the session while the
+    # backend is still working, however quiet it is in here.
+    inflight: set[asyncio.Task] = set()
+    # Last time anyone said anything, either direction.
+    activity = {"last": time.monotonic()}
 
-    # The input stream is already open and capturing; mic_gate stays True so that
-    # everything the user says after the wake word accumulates in frame_queue
-    # while we connect, then gets flushed by _send_audio_loop once the WS is up.
+    transcript = TranscriptBuffer()
+    agent = BackendAgent(
+        instructions=backend_instructions,
+        tools=tools,
+        log=log,
+        analytics=analytics,
+        mode=plan["mode"],
+    )
+
+    # Nothing gates the mic during a session any more: GPT-Live is full duplex
+    # and decides for itself when to stop talking and listen. mic_gate stays on
+    # and belongs to the outer loop (alarm playback, training capture).
     mic_gate["capture"] = True
-    watchdog_control = {"reset_event": asyncio.Event()}
 
-    connect_task = asyncio.create_task(_connect_realtime(agent_instructions, tools, training_mode))
-    output_stream_task = asyncio.create_task(_open_output_stream_async(audio))
-
-    log.info("Connecting to OpenAI Realtime API and opening output stream...")
-    ws, output_stream = await asyncio.gather(connect_task, output_stream_task)
-
-    log.info("Starting audio...")
-    # Flushes the buffered post-wake audio (and then live frames) to the session.
-    send_audio_task = asyncio.create_task(_send_audio_loop(ws, frame_queue))
-    output_stream.start_stream()
-    due_audio_task = asyncio.create_task(_due_audio_loop(ws, audio_manager, ui))
-    
-    # Start watchdog timer
-    log.info("Starting watchdog timer...")
-    watchdog_task = asyncio.create_task(_watchdog_timer(watchdog_control, log, ws))
-
-    log.info("Ready for conversation.")
-
-    analytics.report_event("Conversation")
-    if training_mode:
-        analytics.report_event("WakeWordTraining")
+    log.info("Connecting to GPT-Live and opening output stream...")
+    # Either half can fail - no network, or no audio device - and whichever one
+    # succeeded has to be let go of, or a flaky connection slowly leaks PyAudio
+    # streams across wake cycles.
+    session, output_stream = await asyncio.gather(
+        connect_live_session(plan["instructions"], log),
+        _open_output_stream_async(audio),
+        return_exceptions=True,
+    )
+    if isinstance(session, BaseException) or isinstance(output_stream, BaseException):
+        failure = session if isinstance(session, BaseException) else output_stream
+        log.error("Could not start the conversation: %s", failure)
+        if not isinstance(output_stream, BaseException):
+            try:
+                output_stream.close()
+            except Exception:
+                pass
+        if not isinstance(session, BaseException):
+            await session.disconnect()
+        return None
 
     try:
-        while True:
-            async for response in ws:
-                res_1=json.loads(response)
-                #log.info(f"Received: {res_1.get('type')}")
+        log.info("Starting audio...")
+        output_stream.start_stream()
+        playback = _Playback(output_stream, log)
+        playback.start()
 
-                # error, log it
-                if res_1.get("type") == "error":
-                    error = res_1.get("error")
-                    log.warning(f'Realtime Error: {error}')
+        if plan.get("opening"):
+            # Nothing has been said in this session yet - it was opened by a
+            # button press or a mode change, not by someone speaking - so the
+            # live model needs telling that it is its turn.
+            await session.append_instructions(plan["opening"])
 
-                # generating a response, update state
-                if res_1.get("type") == "response.created":
-                    mic_gate["capture"] = False
-                    ui.update_state(AssistantUIState.TALKING, reason="Assistant responding")
+        tasks = [
+            asyncio.create_task(_send_audio_loop(session, frame_queue, playback)),
+            asyncio.create_task(_due_audio_loop(session, playback, audio_manager, ui)),
+            asyncio.create_task(_ui_state_loop(ui, playback, inflight)),
+            asyncio.create_task(_close_when_quiet_loop(session, playback, outcome, log)),
+            asyncio.create_task(_idle_loop(session, playback, activity, inflight, outcome, plan, log)),
+        ]
 
-                # finished a response, update state and reset watchdog
-                if res_1.get("type") == "response.done":
-                    # Reset watchdog timer since assistant finished speaking
-                    watchdog_control["reset_event"].set()
-                    if ui.state != AssistantUIState.TOOL_CALLING: # if tool calling don't update
-                        asyncio.create_task(_reopen_mic_delayed(mic_gate, 500, ui))
+        log.info("Ready for conversation.")
+        analytics.report_event("Conversation")
+        if plan["mode"] == MODE_TRAINING:
+            analytics.report_event("WakeWordTraining")
 
-                # audio chunk received, play it
-                if res_1.get("type") == "response.output_audio.delta":
-                    base64_audio_data = res_1.get("delta")
-                    if base64_audio_data:
-                        pcm_data = base64.b64decode(base64_audio_data)
-                        output_stream.write(pcm_data)
+        async for event in session.events():
+            kind = event.get("type")
 
-                # need to call a function (tool call)
-                if res_1.get("type") == "response.function_call_arguments.done":
-                    ui.update_state(AssistantUIState.TOOL_CALLING, reason="Starting a tool call")
-                    function_name = res_1.get("name")
-                    arguments = (res_1.get("arguments"))
-                    call_id = res_1.get("call_id")
-                    output = None
+            # error, log it
+            if kind == "error":
+                log.warning("GPT-Live error: %s", event.get("error"))
 
-                    if function_name == "go_to_sleep":
-                        # throw an exception
-                        log.info("User asked us to go to sleep, ending session.")
-                        analytics.report_event("Sleep")
-                        raise Exception("User asked us to go to sleep...")
-                    elif function_name == "start_wake_word_training":
-                        # Swap the session into training mode (dedicated prompt +
-                        # minimal tools); Aurora then collects a name and explains
-                        # the rules before calling begin_wake_word_capture.
-                        log.info("Entering wake word training mode.")
-                        analytics.report_event("WakeWordTraining")
-                        await _enter_training_session(ws)
-                        output = "Entered wake word training mode."
-                    elif function_name == "begin_wake_word_capture":
-                        # End this session and run the capture routine in the outer
-                        # loop, which owns the mic stream and UI.
-                        try:
-                            args = json.loads(arguments)
-                        except Exception:
-                            args = {}
-                        name = args.get("name") or ""
-                        log.info("Starting wake word capture for '%s'.", name)
-                        post_action = {"action": "train_wake_word", "name": name}
-                        raise Exception("Beginning wake word capture...")
-                    elif function_name == "start_cooking":
-                        recipe_tool = next((tool for tool in tools if tool.name == "list_recipes"), None)
-                        if recipe_tool and recipe_tool.is_configured():
-                            try:
-                                args = json.loads(arguments)
-                            except Exception:
-                                output = "Invalid arguments payload"
-                            else:
-                                recipe_name = args.get("recipe_name")
-                                if not recipe_name:
-                                    output = "Missing required argument: recipe_name"
-                                else:
-                                    recipes_dir = recipe_tool._recipes_dir or recipe_tool._resolve_recipes_dir()
-                                    if not recipes_dir:
-                                        output = "Recipes folder is not configured or does not exist"
-                                    else:
-                                        recipe_path = (recipes_dir / recipe_name).resolve()
-                                        if not recipe_path.is_file() or recipe_path.suffix.lower() != ".md":
-                                            output = f"Recipe file not found: {recipe_name}"
-                                        else:
-                                            try:
-                                                with open(recipe_path, "r", encoding="utf-8") as f:
-                                                    recipe_content = f.read()
-                                                await _update_realtime_session(ws, agent_instructions, recipe_content, tools)
+            # speech from the assistant, queue it for playback
+            elif kind == "session.output_audio.delta":
+                delta = event.get("delta")
+                if delta:
+                    playback.enqueue(base64.b64decode(delta))
+                    activity["last"] = time.monotonic()
 
-                                                # Stop watchdog timer
-                                                log.info("Stopping watchdog timer...")
-                                                if watchdog_task:
-                                                    watchdog_task.cancel()
-                                                    watchdog_task = None
+            # captions, both directions. These are the only record of what was
+            # said, and the delegation handler builds its request from them.
+            elif kind == "session.output_transcript.delta":
+                transcript.add_assistant(event.get("delta") or "")
+                activity["last"] = time.monotonic()
 
-                                                output = f"Started cooking session with recipe {recipe_name}."
-                                                log.info(f"Started cooking session with recipe {recipe_name}.")
-                                                analytics.report_event("Cooking")
-                                            except Exception as e:
-                                                log.exception(f"Failed to read recipe file {recipe_name}: {e}")
-                                                output = f"Failed to read recipe file {recipe_name}: {e}"
-                        else:
-                            output = "Recipe tool is not available."
-                    elif function_name == "stop_cooking":
-                        await _update_realtime_session(ws, agent_instructions, "", tools)
-                        # Start watchdog timer
-                        log.info("Restarting watchdog timer...")
-                        watchdog_task = asyncio.create_task(_watchdog_timer(watchdog_control, log, ws))
-                        output = "Stopped cooking session."
-                        log.info("Stopped cooking session.")
-                    else:
-                        for tool in tools:
-                            try:
-                                output = tool.handle(function_name, arguments)
-                                if output:
-                                    log.info(f"Tool {tool.name} handled function call {function_name}")
-                                    break
-                            except Exception as e:
-                                log.exception(f"Error in tool {tool.name}: {e}")
+            elif kind == "session.input_transcript.delta":
+                transcript.add_user(event.get("delta") or "")
+                activity["last"] = time.monotonic()
 
-                    # Keep the UI timer display in sync in case a tool added/removed a
-                    # timer (e.g. delete_timer). Mirrors the resync done in the main/wake
-                    # loops; audio_to_text() returns "" when no timers remain.
-                    ui.set_timer_text(audio_manager.audio_to_text())
+            # GPT-Live wants something done: run it on the backend agent. This
+            # goes on its own task so audio keeps flowing while it works.
+            elif kind == "session.delegation.created":
+                delegation = event.get("delegation") or {}
+                if delegation.get("target") != "client":
+                    log.debug("Ignoring delegation targeted at %s", delegation.get("target"))
+                    continue
+                delegation_id = delegation.get("id") or ""
+                log.info("Delegation created: %s", delegation_id)
+                activity["last"] = time.monotonic()
+                task = asyncio.create_task(_handle_delegation(
+                    agent, session, delegation_id, transcript, outcome, audio_manager, ui, log
+                ))
+                inflight.add(task)
+                task.add_done_callback(inflight.discard)
 
-                    if output:
-                        message = {
-                            "type": "conversation.item.create",
-                            "item": {
-                                "type": "function_call_output",
-                                "output": output,
-                                "call_id": call_id
-                            }
-                        }
-                        await ws.send(json.dumps(message))
-
-                        # force generation after tool call
-                        message = {
-                                "type": "response.create"
-                            }
-                        await ws.send(json.dumps(message))
+            elif kind == "session.closed":
+                log.info("Session closed: reason=%s usage=%ss", event.get("reason"),
+                         (event.get("usage") or {}).get("seconds"))
+                break
 
     except Exception as e:
         log.info(f"Error or user shutdown in conversation: {e}")
     finally:
         log.info("Conversation over, cleaning up.")
-        # Stop sending to the (closing) session; the input stream stays open for
-        # the next wake-word cycle. mic_gate is reset by the outer loop.
-        mic_gate["capture"] = False
-        if watchdog_task:
-            watchdog_task.cancel()
-        if due_audio_task:
-            due_audio_task.cancel()
-        if send_audio_task:
-            send_audio_task.cancel()
+        for task in list(inflight) + tasks:
+            task.cancel()
+        if tasks or inflight:
+            await asyncio.gather(*(list(inflight) + tasks), return_exceptions=True)
+        if playback:
+            await playback.stop()
+        if session:
+            # Close gracefully so the final usage is reported, then let go of
+            # the socket. The receive loop above has stopped, so draining the
+            # remaining events here is safe.
+            await session.request_close()
+            await session.drain_until_closed()
+            await session.disconnect()
         if output_stream:
-            output_stream.stop_stream()
-            output_stream.close()
-        if ws:
-            await ws.close()
+            try:
+                output_stream.stop_stream()
+                output_stream.close()
+            except Exception:
+                log.debug("Output stream already closed", exc_info=True)
+        # The input stream stays open for the next wake-word cycle, and mic_gate
+        # is left on for the outer loop to manage.
 
-    return post_action
+    return outcome.get("action")
 
-async def _watchdog_timer(watchdog_control: dict, log: logging.Logger, ws: websockets.ClientConnection):
-    """Watchdog timer that throws an exception if assistant doesn't finish speaking within the timeout."""
-    while True:
-        try:
-            await asyncio.sleep(1)
-            # Wait for either timeout or reset event
-            await asyncio.wait_for(watchdog_control["reset_event"].wait(), timeout=_REALTIME_WATCHDOG_TIMEOUT_SECONDS)
-            # If we get here, the reset event was set, so clear it and continue
-            watchdog_control["reset_event"].clear()
-        except asyncio.TimeoutError:
-            log.info(f"Realtime conversation timeout: Assistant did not speak within {_REALTIME_WATCHDOG_TIMEOUT_SECONDS} seconds")
-            await _trigger_sleep(ws)
-            break
 
-async def _update_realtime_session(ws: websockets.ClientConnection, agent_instructions: str, recipe: str, tools: list[Tool]):
-    all_tools = [tool.manifest() for tool in tools]
+async def _handle_delegation(
+        agent: BackendAgent,
+        session: LiveSession,
+        delegation_id: str,
+        transcript: TranscriptBuffer,
+        outcome: dict,
+        audio_manager: AudioManager,
+        ui: AssistantUIBase,
+        log: logging.Logger):
+    """Run one delegated task and record any action it produced.
 
-    full_instructions = None
-    if recipe:
-        full_instructions = f"{agent_instructions}{_COOKING_INSTRUCTIONS}{recipe}"
-    else:
-        full_instructions = agent_instructions
-
-    # always include the go_to_sleep tool
-    all_tools.append({
-        "name": "go_to_sleep",
-        "type": "function",
-        "description": "Puts the assistant to sleep and ends the current session.",
-        "parameters": {
-            "type": "object",
-            "properties": {},
-            "required": []
-        }
-    })
-
-    # Offer wake-word training only when enabled (default off). The description
-    # is the trigger: the model calls this when a user asks to help train/teach
-    # the assistant to recognize their voice or the wake word. Handling it swaps
-    # in the dedicated training prompt and tool set (see _enter_training_session).
-    # Gating it here is the single control point that keeps the guided flow from
-    # ever starting when training is disabled.
-    if settings.wake_word_training_enabled:
-        all_tools.append({
-            "name": "start_wake_word_training",
-            "type": "function",
-            "description": (
-                "Start wake-word training. Call this when the user asks to help train or "
-                "teach Aurora to recognize their voice or the wake word (e.g. 'help me train "
-                "you to recognize my voice', 'train your wake word')."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {},
-                "required": []
-            }
-        })
-
-    ## if a recipe folder is configured add start/stop cooking tools
-    recipe_tool = next((tool for tool in tools if tool.name == "list_recipes"), None)
-    if recipe_tool and recipe_tool.is_configured():
-        all_tools.append({
-            "name": "start_cooking",
-            "type": "function",
-            "description": "Starts a cooking session with the specified recipe. Use the list_recipes tool to see available recipes.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "recipe_name": {
-                        "type": "string",
-                        "description": "The filename of the recipe to start (including .md extension)."
-                    }
-                },
-                "required": ["recipe_name"]
-            }
-        })
-        all_tools.append({
-            "name": "stop_cooking",
-            "type": "function",
-            "description": "Stops the current cooking session.",
-            "parameters": {
-                "type": "object",
-                "properties": {},
-                "required": []
-            }
-        })
-
-    await ws.send(json.dumps(_session_event(full_instructions, all_tools)))
-
-def _session_event(instructions: str, tools: list[dict]) -> dict:
-    """Build a session.update payload.
-
-    The model and audio configuration is identical for every mode Aurora runs
-    in - only the instructions and the tool list change - so both the normal
-    session and the wake-word training session are built from here.
+    The delegation event carries no request text, so the task is reconstructed
+    from the transcript captured so far.
     """
-    return {
-        "type": "session.update",
-        "session": {
-            "model": settings.realtime_model,
-            "type": "realtime",
-            "audio": {
-                "input" : {
-                    "format": {
-                        "type": "audio/pcm",
-                        "rate": 24000
-                    },
-                    "noise_reduction" : {
-                        "type": "far_field"
-                    },
-                    "turn_detection": {
-                        "type": "semantic_vad",
-                        "create_response": True,
-                        "interrupt_response": False,
-                        "eagerness": "auto"
-                    },
-                    "transcription": None,
-                },
-                "output": {
-                    "format": {
-                        "type": "audio/pcm",
-                        "rate": 24000
-                    },
-                    "speed": 1,
-                    "voice": settings.agent_voice
-                }
-            },
-            "instructions": instructions,
-            "output_modalities": ['audio'],
-            "tools": tools,
-            "tool_choice": "auto",
-        }
-    }
-
-async def _enter_training_session(ws: websockets.ClientConnection):
-    """Swap the live session into wake-word training mode.
-
-    Fully replaces the instructions with the dedicated training prompt and the
-    tool set with just begin_wake_word_capture + go_to_sleep, so the model stays
-    on-script while it collects a name and explains the rules. The regular prompt
-    is restored automatically on the next conversation (each one reconnects with
-    agent_instructions), so there is no "stop training" tool to call.
-    """
-    training_tools = [
-        {
-            "name": "begin_wake_word_capture",
-            "type": "function",
-            "description": (
-                "Begin recording the wake-word training clips. Call this as soon as the "
-                "user has given their name and you have told them the rules."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "name": {
-                        "type": "string",
-                        "description": "The first name of the person doing the training."
-                    }
-                },
-                "required": ["name"]
-            }
-        },
-        {
-            "name": "go_to_sleep",
-            "type": "function",
-            "description": "Puts the assistant to sleep and ends the current session.",
-            "parameters": {
-                "type": "object",
-                "properties": {},
-                "required": []
-            }
-        },
-    ]
-
-    await ws.send(json.dumps(_session_event(collect.TRAINING_PROMPT, training_tools)))
-
-async def _connect_realtime(agent_instructions: str, tools: list[Tool], training_mode: bool = False):
-    additional_headers = {
-        "Authorization": f"Bearer {settings.openai_api_key}"
-    }
-    
-    ws = await websockets.connect(
-        f"wss://api.openai.com/v1/realtime?model={settings.realtime_model}",
-        additional_headers=additional_headers,
-        ping_interval=_WS_PING_INTERVAL_SECONDS,
-        ping_timeout=_WS_PING_TIMEOUT_SECONDS
-    )
-    
-    if training_mode:
-        # Started from the UI rather than the wake word, so open straight into
-        # training mode instead of the normal prompt.
-        await _enter_training_session(ws)
-        # Nothing was spoken to get here, so semantic VAD has nothing to react
-        # to. Ask for the first response explicitly, otherwise Aurora sits
-        # silent instead of asking who is training. (The voice route doesn't
-        # need this - the start_wake_word_training tool output triggers one.)
-        await ws.send(json.dumps({"type": "response.create"}))
-    else:
-        await _update_realtime_session(ws, agent_instructions, "", tools)
-
-    return ws
-
-async def _trigger_sleep(ws: websockets.ClientConnection):
     try:
-        # tell the assistant to go to sleep
-        message = {
-                "type": "conversation.item.create",
-                "item": {
-                    "type": "message",
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "input_text",
-                            "text": "Call the go_to_sleep function"
-                        }
-                    ]
-                }
-            }
-        await ws.send(json.dumps(message))
-        messageRespond = {
-                "type": "response.create"
-            }
-        await ws.send(json.dumps(messageRespond))
+        action = await agent.handle(session, delegation_id, transcript.recent())
+    except Exception as e:
+        log.exception("Delegation %s failed: %s", delegation_id, e)
+        return
 
-        # in case that doesn't work, repeat the message
-        await asyncio.sleep(1)
-        message2 = {
-                "type": "conversation.item.create",
-                "item": {
-                    "type": "message",
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "input_text",
-                            "text": "This is important - you need to go to sleep now."
-                        }
-                    ]
-                }
-            }
-        await ws.send(json.dumps(message2))
-        messageRespond2 = {
-                "type": "response.create"
-            }
-        await ws.send(json.dumps(messageRespond2))
-    except Exception:
-        pass
-    
-async def _due_audio_loop(ws: websockets.ClientConnection, audio_manager:AudioManager, ui: AssistantUIBase):
-    while True:
-        await asyncio.sleep(1)
-        if audio_manager.has_due_audio() or ui.is_cancel_pressed():
-            # go to sleep if we have due audio
-            await _trigger_sleep(ws)
-        elif audio_manager.has_any_audio():
-            # otherwise update any time text
-            ui.set_timer_text(audio_manager.audio_to_text())
+    # A tool may have added or removed a timer, so resync the display. Mirrors
+    # the resync done in the main and wake-word loops.
+    ui.set_timer_text(audio_manager.audio_to_text())
 
-async def _send_audio_loop(ws: websockets.ClientConnection, frame_queue: asyncio.Queue):
+    # First action wins: a second opinion about which mode to be in would only
+    # fight with the first.
+    if action and "action" not in outcome:
+        log.info("Session will end on action: %s", action.get("action"))
+        outcome["action"] = action
+
+
+async def _send_audio_loop(session: LiveSession, frame_queue: asyncio.Queue, playback: _Playback):
+    """Stream mic frames to GPT-Live.
+
+    Frames go up continuously. GPT-Live listens and speaks at the same time and
+    handles interruptions itself, so there is no response-driven gate here any
+    more. MUTE_INPUT_WHILE_SPEAKING is the one exception, for hardware where the
+    speaker bleeds into the mic badly enough that Aurora hears herself - it
+    costs the ability to interrupt her, which is why it is off by default.
+    """
+    muted = False
     while True:
         try:
             frame = await frame_queue.get()
-            if frame:
-                audio_event = {
-                    "type": "input_audio_buffer.append",
-                    "audio": base64.b64encode(frame).decode('utf-8')
-                }
-                await ws.send(json.dumps(audio_event))       
+            if not frame:
+                continue
+            if settings.mute_input_while_speaking:
+                if playback.speaking:
+                    if not muted:
+                        muted = True
+                        await session.mute_input()
+                    continue
+                if muted:
+                    muted = False
+                    await session.unmute_input()
+            await session.append_audio(frame)
         except Exception:
             pass
 
-async def _reopen_mic_delayed(mic_gate, delay_ms: int, ui: AssistantUIBase):
-    await asyncio.sleep(delay_ms / 1000)
-    mic_gate["capture"] = True
-    ui.update_state(AssistantUIState.LISTENING, reason="Assistant finished")
+
+async def _due_audio_loop(session: LiveSession, playback: _Playback,
+                          audio_manager: AudioManager, ui: AssistantUIBase):
+    """End the session when a timer comes due or the user presses cancel.
+
+    Both want the speaker now, so this closes the session outright instead of
+    asking Aurora to wrap up, and drops whatever she had left to say.
+    """
+    while True:
+        await asyncio.sleep(1)
+        if audio_manager.has_due_audio() or ui.is_cancel_pressed():
+            playback.clear()
+            await session.request_close()
+            return
+        if audio_manager.has_any_audio():
+            ui.set_timer_text(audio_manager.audio_to_text())
+
+
+async def _close_when_quiet_loop(session: LiveSession, playback: _Playback,
+                                 outcome: dict, log: logging.Logger):
+    """Close the session once an action is pending and Aurora has finished.
+
+    There is no end-of-speech event, so this waits on the playback queue. Two
+    waits, not one: the backend decides to sleep (or to change mode) in the same
+    breath as it reports the result, which GPT-Live is still turning into speech
+    at that point, so closing on the first quiet moment would cut Aurora off
+    before she had said anything at all.
+    """
+    while not outcome:
+        await asyncio.sleep(0.2)
+
+    waited = 0.0
+    while not playback.speaking and waited < _SPEECH_START_GRACE_SECONDS:
+        await asyncio.sleep(0.2)
+        waited += 0.2
+
+    waited = 0.0
+    while playback.quiet_for() < _PLAYBACK_QUIET_SECONDS and waited < _SLEEP_GRACE_SECONDS:
+        await asyncio.sleep(0.2)
+        waited += 0.2
+
+    log.info("Closing the session on action: %s", (outcome.get("action") or {}).get("action"))
+    await session.request_close()
+
+
+async def _idle_loop(session: LiveSession, playback: _Playback, activity: dict,
+                     inflight: set, outcome: dict, plan: dict, log: logging.Logger):
+    """Close the session after a long silence.
+
+    This replaces the old watchdog, which hung off response.done - an event
+    GPT-Live does not have. A session nobody speaks to again has to be noticed
+    here or it would stay open indefinitely. Cooking mode is exempt, where long
+    silences are exactly what is expected.
+    """
+    if plan["mode"] == MODE_COOKING or settings.idle_timeout_seconds <= 0:
+        return
+
+    while True:
+        await asyncio.sleep(1)
+        if inflight or outcome or playback.speaking:
+            continue
+        idle = time.monotonic() - activity["last"]
+        if idle >= settings.idle_timeout_seconds:
+            log.info("Nothing said for %.0fs, ending the session", idle)
+            await session.request_close()
+            return
+
+
+async def _ui_state_loop(ui: AssistantUIBase, playback: _Playback, inflight: set):
+    """Keep the UI showing what Aurora is actually doing.
+
+    Replaces the old response.created / response.done transitions, which have no
+    GPT-Live equivalent: talking is the playback queue being busy, tool calling
+    is a delegation in flight, and anything else is listening.
+    """
+    shown = None
+    while True:
+        await asyncio.sleep(0.2)
+        if inflight:
+            state, reason = AssistantUIState.TOOL_CALLING, "Backend working"
+        elif playback.speaking or playback.quiet_for() < _TALK_HOLD_SECONDS:
+            state, reason = AssistantUIState.TALKING, "Assistant speaking"
+        else:
+            state, reason = AssistantUIState.LISTENING, "Listening"
+        if state is not shown:
+            shown = state
+            ui.update_state(state, reason=reason)
+
 
 def _make_audio_callback(loop, frame_queue: asyncio.Queue, should_capture):
     def _callback(in_data, frame_count, time_info, status_flags):
@@ -805,7 +791,7 @@ async def _open_input_stream_async(audio: pyaudio.PyAudio, loop, frame_queue: as
         return audio.open(
             format=pyaudio.paInt16,
             channels=1,
-            rate=_REALTIME_SAMPLERATE,
+            rate=LIVE_SAMPLERATE,
             input=True,
             frames_per_buffer=_INPUT_FRAMESPERBUFFER,
             input_device_index=settings.input_device_id,
@@ -819,9 +805,9 @@ async def _open_output_stream_async(audio: pyaudio.PyAudio):
         return audio.open(
             format=pyaudio.paInt16,
             channels=1,
-            rate=_REALTIME_SAMPLERATE,
+            rate=LIVE_SAMPLERATE,
             output=True,
-            frames_per_buffer=_REALTIME_FRAMESPERBUFFER,
+            frames_per_buffer=_OUTPUT_FRAMESPERBUFFER,
             output_device_index=settings.output_device_id,
             start=False,  # open but don't start yet
         )

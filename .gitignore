@@ -2,6 +2,7 @@
 *.ppn
 agent_instructions.txt
 agent_instructions.md
+backend_instructions.md
 
 # Wake word training data (large + contains family voice recordings).
 # The trained model itself (wake_word/models/*.onnx + .json) IS committed.

@@ -3,7 +3,7 @@
 This module powers the guided training flow, reached either by asking Aurora to
 "help me train you to recognize my voice" or by pressing the joystick button
 while she is asleep. It holds the dedicated training-mode prompt (swapped into the
-realtime session so the small model stays tightly on-script), plus the routine
+live session so the small model stays tightly on-script), plus the routine
 that records positive ("Aurora") and negative (any other word) clips from the
 already-open mic stream and writes them to disk for later training.
 
@@ -31,8 +31,8 @@ import wave
 from wake_word import config
 
 # Prompt that fully replaces Aurora's normal instructions while training mode is
-# active. Kept short and imperative because the realtime model is not very smart
-# and must stay on-script.
+# active. Kept short and imperative because the live voice model is not very
+# smart and must stay on-script.
 TRAINING_PROMPT = """You are Aurora, a friendly cartoon squid home assistant, now in WAKE WORD
 TRAINING MODE. Be quick: two short turns, then start recording.
 

@@ -33,7 +33,7 @@ class ControlLightTool(Tool):
             return False
 
     def manifest(self) -> dict:
-        """Return the tool manifest for the OpenAI Realtime API."""
+        """Return the tool manifest for the backend agent."""
         return {
             "name": self.name,
             "type": "function",

@@ -105,11 +105,47 @@ class Settings(BaseSettings):
         validation_alias="AGENT_INSTRUCTIONS_PATH",
     )
 
-    # Realtime model selection (defaults to 'gpt-realtime-1.5')
-    realtime_model: str = Field(
-        default="gpt-realtime-1.5",
-        description="OpenAI realtime model to use (e.g., gpt-realtime-1.5)",
-        validation_alias="REALTIME_MODEL",
+    # Backend agent instructions file path. Aurora runs client delegation, so the
+    # prompt is split in two: agent_instructions_path holds the voice persona and
+    # the delegation policy, this one holds the tool rules for the backend agent.
+    backend_instructions_path: str | None = Field(
+        default=None,
+        description="Path to a file containing instructions for the backend (delegation) agent",
+        validation_alias="BACKEND_INSTRUCTIONS_PATH",
+    )
+
+    # GPT-Live voice model (defaults to 'gpt-live-1')
+    live_model: str = Field(
+        default="gpt-live-1",
+        description="GPT-Live voice model to use (e.g., gpt-live-1)",
+        validation_alias="LIVE_MODEL",
+    )
+
+    # Model for the backend agent that GPT-Live delegates tasks to. This is the
+    # model that picks and reasons about tools; the voice model only speaks.
+    backend_model: str = Field(
+        default="gpt-5.6-luna",
+        description="Model used by the backend delegation agent (e.g., gpt-5.6-luna)",
+        validation_alias="BACKEND_MODEL",
+    )
+
+    # GPT-Live has no end-of-response event, so the session is closed from here
+    # after this long with no speech in either direction and nothing left to play.
+    # Disabled while cooking, where long silences are expected.
+    idle_timeout_seconds: int = Field(
+        default=30,
+        description="Seconds of silence (no speech either way, nothing playing) before the session is closed",
+        validation_alias="IDLE_TIMEOUT_SECONDS",
+    )
+
+    # GPT-Live is full duplex and handles interruptions itself, so Aurora streams
+    # the mic continuously. On hardware where the speaker bleeds into the mic (no
+    # echo cancellation) that means she can hear herself; set this to stop sending
+    # mic audio while she is speaking. Costs the ability to interrupt her.
+    mute_input_while_speaking: bool = Field(
+        default=False,
+        description="Stop sending mic audio while the assistant is speaking (workaround for speaker/mic echo)",
+        validation_alias="MUTE_INPUT_WHILE_SPEAKING",
     )
 
     # Agent voice selection (defaults to 'shimmer')

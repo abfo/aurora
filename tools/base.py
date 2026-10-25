@@ -9,7 +9,7 @@ from analytics import Analytics
 
 
 class Tool:
-    """Synchronous tool interface for Realtime API function tools."""
+    """Synchronous tool interface for Aurora's backend agent function tools."""
 
     name: str = ""
 
@@ -23,7 +23,7 @@ class Tool:
         raise NotImplementedError
 
     def manifest(self) -> dict:
-        """Return the tool manifest to include in the Realtime API tools array."""
+        """Return the tool manifest to include in the backend agent tools array."""
         raise NotImplementedError
 
     def handle(self, tool_name: str, arguments: Any) -> Optional[str]:

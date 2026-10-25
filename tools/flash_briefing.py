@@ -44,7 +44,7 @@ class FlashBriefingTool(Tool):
         if not self.audio_manager:
             return "Audio manager not available"
 
-        # Do the network/ffmpeg work off the realtime event loop so we can return
+        # Do the network/ffmpeg work off the asyncio event loop so we can return
         # immediately (mirrors how timer_set offloads audio generation).
         th = threading.Thread(target=self._download_and_schedule_blocking, daemon=True)
         th.start()

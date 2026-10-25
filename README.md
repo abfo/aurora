@@ -3,7 +3,9 @@
 Aurora is an Alexa / Google Home style assistant implemented in python. The project includes a headless UX
 that just needs audio, and an implementation that runs on Raspberry PI 4 with the [Adafruit BrainCraft HAT](https://learn.adafruit.com/adafruit-braincraft-hat-easy-machine-learning-for-raspberry-pi).
 
-Aurora uses the OpenAI realtime API. You need an [OpenAI API Key](https://platform.openai.com/). Wake word detection
+Aurora uses the OpenAI [GPT-Live API](https://developers.openai.com/api/docs/guides/live) for voice, in
+client delegation mode: GPT-Live listens and speaks, and hands tasks to a backend agent that runs inside Aurora
+and calls the tools. You need an [OpenAI API Key](https://platform.openai.com/). Wake word detection
 uses a small, fully local model that we train ourselves (no third-party wake word service) - a trained "Aurora" model
 is included, and it's easy to add your own voice recordings and retrain. See [wake_word/README.md](/wake_word/README.md).
 
@@ -23,7 +25,12 @@ Aurora supports a plugin system for tools. The following are included:
 5. Next Transit - get predicted arrival times for a configured Bay Area public transit route.
 6. Cheese Night - a simple tool to decide which kid gets the first pick of chores.
 
-Tools are only included in realtime calls if configured (see .env.example). To add a new tool just inherit from the Tool base class and add any required settings. If you add something useful please send a pull request. The realtime API has support for server MCP in addition to local tools, this is not supported yet but would be straightforward to add.
+Tools are only offered to the backend agent if configured (see .env.example). To add a new tool just inherit from the Tool base class and add any required settings. If you add something useful please send a pull request.
+
+The prompt is split in two, because GPT-Live splits the job in two: `agent_instructions.md` is the live prompt
+(persona, speaking style, and the policy for when to hand work to the backend), and `backend_instructions.md` is
+the backend prompt (how to pick tools and report results). The GPT-Live WebSocket lives in `live_session.py`, and
+the backend agent in `backend_agent.py`.
 
 ## Headless Configuration
 
