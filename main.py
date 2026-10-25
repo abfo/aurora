@@ -3,10 +3,13 @@ import json
 import logging
 import os
 import struct
+import threading
 import time
 import wave
 from collections import deque
 from datetime import datetime, timedelta
+from typing import NamedTuple
+import numpy as np
 import requests
 from settings import settings
 from logging_config import configure_logging
@@ -28,7 +31,20 @@ from backend_agent import (
 )
 
 _AUDIO_PLAYBACK_CHUNK = 1024
-_OUTPUT_FRAMESPERBUFFER = 4096
+# ~85 ms per output callback. Smaller than GPT-Live's 100 ms chunks, so each
+# pull takes a modest bite out of the jitter buffer rather than most of it.
+_OUTPUT_FRAMESPERBUFFER = 2048
+_BYTES_PER_MS = LIVE_SAMPLERATE * 2 // 1000
+# GPT-Live streams silence between utterances as exact digital zeros, while
+# speech chunks measure far above this RMS, so one threshold separates them.
+_VOICED_RMS = 300
+# A chunk no louder than this is silence that can be stretched or skipped
+# without anyone hearing it. Deliberately stricter than _VOICED_RMS, so the
+# quiet tail of a word is never touched.
+_SILENT_PEAK = 16
+# Let the jitter buffer run this far over target before trimming silence, so
+# latency can't creep up if GPT-Live runs slightly faster than the sound card.
+_PLAYBACK_TRIM_MS = 200
 # Smaller input buffer (~43 ms @ 24 kHz) so wake-word detection stays responsive
 # and post-wake audio is buffered at fine granularity for the handoff to GPT-Live.
 _INPUT_FRAMESPERBUFFER = 1024
@@ -46,8 +62,9 @@ _SLEEP_GRACE_SECONDS = 8.0
 # one is silent. The backend usually decides to sleep in the same breath as it
 # reports the result, so at that point she has not started talking yet.
 _SPEECH_START_GRACE_SECONDS = 3.0
-# Hold the TALKING state across short gaps between audio chunks so the UI does
-# not flicker between talking and listening mid-sentence.
+# Aurora counts as speaking for this long after her last voiced audio, so the
+# UI does not flicker between words and the optional mic mute covers the echo
+# still coming out of the speaker.
 _TALK_HOLD_SECONDS = 0.5
 
 _COOKING_INSTRUCTIONS = """
@@ -393,73 +410,173 @@ def _training_plan() -> dict:
     }
 
 
-class _Playback:
-    """Assistant speech, queued here and written to the output stream.
+class _Chunk(NamedTuple):
+    """One output delta, classified once on arrival."""
+    pcm: bytes
+    voiced: bool   # contains speech
+    silent: bool   # digital silence, safe to stretch or skip
 
-    GPT-Live streams speech as audio deltas with no end-of-speech event and no
-    timing, so whether Aurora is still talking is something the client has to
-    work out for itself. This is where that is known: the idle timer, the UI
-    state and the optional mic mute all read it from here.
+
+class _Playback:
+    """Assistant audio, buffered here and pulled by PortAudio on its own thread.
+
+    GPT-Live sends output as one continuous stream for the whole session: a
+    100 ms chunk roughly every 100 ms, digital silence between utterances, and
+    never ahead of real time. Two things that used to come for free therefore
+    have to be done here.
+
+    A jitter buffer. The Realtime API sent audio faster than real time, so the
+    old blocking writes built up a cushion in the device buffer. GPT-Live never
+    gets ahead, so without a deliberate cushion any network hiccup or event-loop
+    stall empties the device buffer and the speaker clicks. Playback holds back
+    until PLAYBACK_BUFFER_MS is queued, and the stream runs in callback mode, so
+    PortAudio pulls audio when it needs it rather than waiting for the event
+    loop to push it.
+
+    Speech detection. A chunk arriving says nothing about whether Aurora is
+    talking, because silence arrives too. Each chunk is classified by energy as
+    it is queued, and :attr:`speaking` means voiced audio is still queued or
+    played within the last _TALK_HOLD_SECONDS. The idle timer, the UI state,
+    the session-ending wait and the optional mic mute all read it from here.
     """
 
-    def __init__(self, stream, log: logging.Logger):
-        self._stream = stream
+    def __init__(self, log: logging.Logger):
         self._log = log
-        self._queue: asyncio.Queue = asyncio.Queue()
-        self._task: asyncio.Task | None = None
-        self._writing = False
-        self._quiet_since = time.monotonic()
+        # The event loop enqueues and PortAudio's thread pulls, so everything
+        # below the lock is shared between them.
+        self._lock = threading.Lock()
+        self._chunks: deque[_Chunk] = deque()
+        self._head = 0           # bytes of _chunks[0] already played
+        self._level = 0          # bytes queued and not yet played
+        self._pending = b""      # odd trailing byte, carried into the next delta
+        self._target = settings.playback_buffer_ms * _BYTES_PER_MS
+        self._low_water = self._target // 2
+        self._ceiling = self._target + _PLAYBACK_TRIM_MS * _BYTES_PER_MS
+        self._buffering = True   # holding back until the cushion is full
+        self._refilling = False  # rebuilding a depleted cushion during silence
+        self._queued_voiced = 0
+        self._last_voiced = 0.0
+        self._created = time.monotonic()
+        # Logged when the session ends, to tune PLAYBACK_BUFFER_MS on hardware.
+        self._underruns = 0
+        self._device_underflows = 0
+        self._inserted_ms = 0.0
+        self._dropped_ms = 0.0
 
-    def start(self) -> None:
-        self._task = asyncio.create_task(self._run())
+    def enqueue(self, pcm: bytes) -> bool:
+        """Queue one output delta. Returns True if it contains speech."""
+        # The callback hands PortAudio whole 16-bit samples; one stray byte
+        # would shift every sample after it into noise.
+        pcm = self._pending + pcm
+        whole = len(pcm) - len(pcm) % 2
+        pcm, self._pending = pcm[:whole], pcm[whole:]
+        if not pcm:
+            return False
 
-    def enqueue(self, pcm: bytes) -> None:
-        self._queue.put_nowait(pcm)
+        samples = np.frombuffer(pcm, dtype="<i2").astype(np.int32)
+        rms = float(np.sqrt(np.mean(samples.astype(np.float64) ** 2)))
+        chunk = _Chunk(pcm, rms > _VOICED_RMS, int(np.abs(samples).max()) <= _SILENT_PEAK)
+
+        with self._lock:
+            self._chunks.append(chunk)
+            self._level += len(pcm)
+            if chunk.voiced:
+                self._queued_voiced += 1
+        return chunk.voiced
 
     def clear(self) -> None:
         """Drop anything not yet played (cancel button, session ending)."""
-        try:
-            while True:
-                self._queue.get_nowait()
-        except asyncio.QueueEmpty:
-            pass
+        with self._lock:
+            self._chunks.clear()
+            self._head = 0
+            self._level = 0
+            self._pending = b""
+            self._queued_voiced = 0
+            self._buffering = True
+            self._refilling = False
 
     @property
     def speaking(self) -> bool:
-        return self._writing or not self._queue.empty()
+        return (self._queued_voiced > 0
+                or time.monotonic() - self._last_voiced < _TALK_HOLD_SECONDS)
 
     def quiet_for(self) -> float:
-        """Seconds since the last chunk was played; 0 while still speaking."""
+        """Seconds since Aurora last spoke; 0 while she is speaking."""
         if self.speaking:
             return 0.0
-        return time.monotonic() - self._quiet_since
+        return time.monotonic() - (self._last_voiced or self._created)
 
-    async def _run(self) -> None:
-        while True:
-            pcm = await self._queue.get()
-            if pcm is None:
-                return
-            self._writing = True
-            try:
-                await asyncio.to_thread(self._stream.write, pcm)
-            except Exception:
-                self._log.debug("Dropped a playback chunk", exc_info=True)
-            finally:
-                self._writing = False
-                if self._queue.empty():
-                    self._quiet_since = time.monotonic()
+    def summary(self) -> str:
+        return (f"{self._underruns} underruns, {self._device_underflows} device underflows, "
+                f"{self._inserted_ms:.0f} ms silence inserted, {self._dropped_ms:.0f} ms silence skipped")
 
-    async def stop(self) -> None:
-        """Stop playing and let the writer finish, before the stream closes."""
-        if self._task is None:
-            return
-        self.clear()
-        self._queue.put_nowait(None)
-        try:
-            await asyncio.wait_for(self._task, timeout=2)
-        except Exception:
-            self._task.cancel()
-        self._task = None
+    def callback(self, in_data, frame_count, time_info, status_flags):
+        """PortAudio output callback. Runs on PortAudio's thread and never waits.
+
+        A device underflow means this callback itself ran late (CPU or GIL
+        contention); an underrun means the jitter buffer ran dry (network).
+        They are counted separately because they have different fixes.
+        """
+        if status_flags & pyaudio.paOutputUnderflow:
+            self._device_underflows += 1
+        need = frame_count * 2
+        with self._lock:
+            out = self._pull(need)
+        # Always return the full length: PyAudio treats a short buffer as the
+        # end of the stream.
+        return (out, pyaudio.paContinue)
+
+    def _pull(self, need: int) -> bytes:
+        if self._buffering:
+            if self._level < self._target:
+                return bytes(need)
+            self._buffering = False
+
+        out = bytearray()
+        while len(out) < need:
+            if not self._chunks:
+                # Ran dry mid-stream. Pad with silence and rebuild the whole
+                # cushion before playing again, rather than stuttering along
+                # chunk by chunk.
+                self._underruns += 1
+                self._buffering = True
+                out.extend(bytes(need - len(out)))
+                break
+
+            chunk = self._chunks[0]
+            if self._head == 0 and chunk.silent:
+                # Between utterances nobody can hear the cushion being adjusted,
+                # so this is where clock drift between GPT-Live and the sound
+                # card is corrected: stretch the silence when running low (with
+                # hysteresis, so it refills fully), skip it when running long.
+                if self._level < self._low_water:
+                    self._refilling = True
+                if self._refilling:
+                    if self._level < self._target:
+                        gap = need - len(out)
+                        out.extend(bytes(gap))
+                        self._inserted_ms += gap / _BYTES_PER_MS
+                        break
+                    self._refilling = False
+                elif self._level > self._ceiling:
+                    self._chunks.popleft()
+                    self._level -= len(chunk.pcm)
+                    self._dropped_ms += len(chunk.pcm) / _BYTES_PER_MS
+                    continue
+
+            take = min(need - len(out), len(chunk.pcm) - self._head)
+            out.extend(chunk.pcm[self._head:self._head + take])
+            self._head += take
+            self._level -= take
+            if chunk.voiced:
+                self._last_voiced = time.monotonic()
+            if self._head >= len(chunk.pcm):
+                self._chunks.popleft()
+                self._head = 0
+                if chunk.voiced:
+                    self._queued_voiced -= 1
+
+        return bytes(out)
 
 
 async def run_conversation(
@@ -483,7 +600,6 @@ async def run_conversation(
     """
     session = None
     output_stream = None
-    playback = None
     tasks: list[asyncio.Task] = []
     # Filled in by the delegation handler with the action this session ends on.
     outcome: dict = {}
@@ -507,13 +623,16 @@ async def run_conversation(
     # and belongs to the outer loop (alarm playback, training capture).
     mic_gate["capture"] = True
 
+    # The output stream pulls from this, so it has to exist before the stream.
+    playback = _Playback(log)
+
     log.info("Connecting to GPT-Live and opening output stream...")
     # Either half can fail - no network, or no audio device - and whichever one
     # succeeded has to be let go of, or a flaky connection slowly leaks PyAudio
     # streams across wake cycles.
     session, output_stream = await asyncio.gather(
         connect_live_session(plan["instructions"], log),
-        _open_output_stream_async(audio),
+        _open_output_stream_async(audio, playback.callback),
         return_exceptions=True,
     )
     if isinstance(session, BaseException) or isinstance(output_stream, BaseException):
@@ -531,8 +650,6 @@ async def run_conversation(
     try:
         log.info("Starting audio...")
         output_stream.start_stream()
-        playback = _Playback(output_stream, log)
-        playback.start()
 
         if plan.get("opening"):
             # Nothing has been said in this session yet - it was opened by a
@@ -560,11 +677,11 @@ async def run_conversation(
             if kind == "error":
                 log.warning("GPT-Live error: %s", event.get("error"))
 
-            # speech from the assistant, queue it for playback
+            # output audio, queue it for playback. This arrives all session
+            # long, silence included, so only speech counts as activity.
             elif kind == "session.output_audio.delta":
                 delta = event.get("delta")
-                if delta:
-                    playback.enqueue(base64.b64decode(delta))
+                if delta and playback.enqueue(base64.b64decode(delta)):
                     activity["last"] = time.monotonic()
 
             # captions, both directions. These are the only record of what was
@@ -606,21 +723,21 @@ async def run_conversation(
             task.cancel()
         if tasks or inflight:
             await asyncio.gather(*(list(inflight) + tasks), return_exceptions=True)
-        if playback:
-            await playback.stop()
-        if session:
-            # Close gracefully so the final usage is reported, then let go of
-            # the socket. The receive loop above has stopped, so draining the
-            # remaining events here is safe.
-            await session.request_close()
-            await session.drain_until_closed()
-            await session.disconnect()
-        if output_stream:
-            try:
-                output_stream.stop_stream()
-                output_stream.close()
-            except Exception:
-                log.debug("Output stream already closed", exc_info=True)
+        # Release the speaker first: closing the session can take a while to
+        # drain, and there is nothing left worth playing.
+        playback.clear()
+        try:
+            output_stream.stop_stream()
+            output_stream.close()
+        except Exception:
+            log.debug("Output stream already closed", exc_info=True)
+        log.info("Playback: %s", playback.summary())
+        # Close gracefully so the final usage is reported, then let go of the
+        # socket. The receive loop above has stopped, so draining the remaining
+        # events here is safe.
+        await session.request_close()
+        await session.drain_until_closed()
+        await session.disconnect()
         # The input stream stays open for the next wake-word cycle, and mic_gate
         # is left on for the outer loop to manage.
 
@@ -666,22 +783,18 @@ async def _send_audio_loop(session: LiveSession, frame_queue: asyncio.Queue, pla
     more. MUTE_INPUT_WHILE_SPEAKING is the one exception, for hardware where the
     speaker bleeds into the mic badly enough that Aurora hears herself - it
     costs the ability to interrupt her, which is why it is off by default.
+
+    Muting swaps the mic for digital silence rather than dropping frames or
+    using the server's mute: GPT-Live expects an unbroken stream paced like a
+    live mic, and this leaves no server-side state that could get stuck.
     """
-    muted = False
     while True:
         try:
             frame = await frame_queue.get()
             if not frame:
                 continue
-            if settings.mute_input_while_speaking:
-                if playback.speaking:
-                    if not muted:
-                        muted = True
-                        await session.mute_input()
-                    continue
-                if muted:
-                    muted = False
-                    await session.unmute_input()
+            if settings.mute_input_while_speaking and playback.speaking:
+                frame = bytes(len(frame))
             await session.append_audio(frame)
         except Exception:
             pass
@@ -708,11 +821,11 @@ async def _close_when_quiet_loop(session: LiveSession, playback: _Playback,
                                  outcome: dict, log: logging.Logger):
     """Close the session once an action is pending and Aurora has finished.
 
-    There is no end-of-speech event, so this waits on the playback queue. Two
-    waits, not one: the backend decides to sleep (or to change mode) in the same
-    breath as it reports the result, which GPT-Live is still turning into speech
-    at that point, so closing on the first quiet moment would cut Aurora off
-    before she had said anything at all.
+    There is no end-of-speech event, so this waits on voiced audio in the
+    playback buffer. Two waits, not one: the backend decides to sleep (or to
+    change mode) in the same breath as it reports the result, which GPT-Live is
+    still turning into speech at that point, so closing on the first quiet
+    moment would cut Aurora off before she had said anything at all.
     """
     while not outcome:
         await asyncio.sleep(0.2)
@@ -758,7 +871,7 @@ async def _ui_state_loop(ui: AssistantUIBase, playback: _Playback, inflight: set
     """Keep the UI showing what Aurora is actually doing.
 
     Replaces the old response.created / response.done transitions, which have no
-    GPT-Live equivalent: talking is the playback queue being busy, tool calling
+    GPT-Live equivalent: talking is voiced audio queued or playing, tool calling
     is a delegation in flight, and anything else is listening.
     """
     shown = None
@@ -766,7 +879,7 @@ async def _ui_state_loop(ui: AssistantUIBase, playback: _Playback, inflight: set
         await asyncio.sleep(0.2)
         if inflight:
             state, reason = AssistantUIState.TOOL_CALLING, "Backend working"
-        elif playback.speaking or playback.quiet_for() < _TALK_HOLD_SECONDS:
+        elif playback.speaking:
             state, reason = AssistantUIState.TALKING, "Assistant speaking"
         else:
             state, reason = AssistantUIState.LISTENING, "Listening"
@@ -800,7 +913,7 @@ async def _open_input_stream_async(audio: pyaudio.PyAudio, loop, frame_queue: as
         )
     return await asyncio.to_thread(_open)
 
-async def _open_output_stream_async(audio: pyaudio.PyAudio):
+async def _open_output_stream_async(audio: pyaudio.PyAudio, stream_callback):
     def _open():
         return audio.open(
             format=pyaudio.paInt16,
@@ -809,6 +922,7 @@ async def _open_output_stream_async(audio: pyaudio.PyAudio):
             output=True,
             frames_per_buffer=_OUTPUT_FRAMESPERBUFFER,
             output_device_index=settings.output_device_id,
+            stream_callback=stream_callback,
             start=False,  # open but don't start yet
         )
     return await asyncio.to_thread(_open)

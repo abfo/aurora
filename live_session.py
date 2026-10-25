@@ -162,13 +162,6 @@ class LiveSession:
             "content": clip_content(content),
         })
 
-    async def mute_input(self) -> None:
-        """Stop GPT-Live consuming mic audio, without ending the session."""
-        await self._send({"type": "session.input_audio.mute", "event_id": _event_id()})
-
-    async def unmute_input(self) -> None:
-        await self._send({"type": "session.input_audio.unmute", "event_id": _event_id()})
-
     # -------------------- Shutting down --------------------
     async def request_close(self) -> None:
         """Ask GPT-Live to end the session.

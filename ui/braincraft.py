@@ -1,6 +1,7 @@
 from __future__ import annotations
 from enum import Enum
 import logging
+import threading
 import board
 from digitalio import DigitalInOut, Direction, Pull
 import adafruit_dotstar
@@ -95,6 +96,18 @@ class BraincraftUI(AssistantUIBase):
             # black image to start
             self._send_image_data(self._image_black)
 
+            # Redraws run on a worker thread. A state change is two full-screen
+            # SPI frames (~230 KB at 24 MHz) plus bit-banged LED updates, which
+            # takes long enough that doing it on the caller - the asyncio loop -
+            # stalled audio. The callers now only flag that a redraw is due.
+            # _draw_lock serialises all display and LED access, since the
+            # training cues still draw directly from the caller.
+            self._draw_lock = threading.Lock()
+            self._redraw = threading.Event()
+            self._closing = False
+            self._worker = threading.Thread(target=self._draw_loop, name="braincraft-ui", daemon=True)
+            self._worker.start()
+
         except Exception:
             self._log.exception("Failed to initialize BraincraftUI")
             raise
@@ -105,37 +118,50 @@ class BraincraftUI(AssistantUIBase):
         current: AssistantUIState,
         reason: str | None = None,
     ) -> None:
-        try:
-            self._log.info("UI state changed from %s to %s: %s", previous, current, reason)
-            self._update_state()
-        except Exception:
-            self._log.exception("on_state_changed failed")
+        self._log.info("UI state changed from %s to %s: %s", previous, current, reason)
+        self._redraw.set()
 
     def on_timer_text_changed(self, text: str) -> None:
-        try:
-            self._update_state()
-        except Exception:
-            self._log.exception("on_timer_text_changed failed")
+        self._redraw.set()
+
+    def _draw_loop(self) -> None:
+        """Redraw whenever a change has been flagged, always from the latest state.
+
+        Changes that land while a redraw is in progress just set the flag again,
+        so a burst of them costs one more redraw of wherever things ended up,
+        not one redraw per change.
+        """
+        while True:
+            self._redraw.wait()
+            self._redraw.clear()
+            if self._closing:
+                return
+            with self._draw_lock:
+                self._update_state()
 
     # Wake-word training cues: all LEDs green for positives, red for negatives.
+    # These draw synchronously, so the cue is showing by the time the caller
+    # starts its lead-in timer; nothing is playing during training capture.
     def show_training_prompt(self, label: str, index: int, total: int) -> None:
         try:
-            color = (0, 255, 0) if label == "positives" else (255, 0, 0)
-            self._dotstar[0] = color
-            self._dotstar[1] = color
-            self._dotstar[2] = color
-            if label == "positives":
-                self._display_text(f"Say Aurora\n{index}/{total}")
-            else:
-                self._display_text(f"Say any word\n{index}/{total}")
+            with self._draw_lock:
+                color = (0, 255, 0) if label == "positives" else (255, 0, 0)
+                self._dotstar[0] = color
+                self._dotstar[1] = color
+                self._dotstar[2] = color
+                if label == "positives":
+                    self._display_text(f"Say Aurora\n{index}/{total}")
+                else:
+                    self._display_text(f"Say any word\n{index}/{total}")
         except Exception:
             self._log.exception("show_training_prompt failed")
 
     def clear_training_lights(self) -> None:
         try:
-            self._dotstar[0] = (0, 0, 0)
-            self._dotstar[1] = (0, 0, 0)
-            self._dotstar[2] = (0, 0, 0)
+            with self._draw_lock:
+                self._dotstar[0] = (0, 0, 0)
+                self._dotstar[1] = (0, 0, 0)
+                self._dotstar[2] = (0, 0, 0)
         except Exception:
             self._log.exception("clear_training_lights failed")
 
@@ -165,9 +191,13 @@ class BraincraftUI(AssistantUIBase):
 
     # Lifecycle
     def shutdown(self) -> None:
-        self._send_image_data(self._image_black)
-        self._dotstar.deinit()
-        self._spi.deinit()
+        self._closing = True
+        self._redraw.set()
+        self._worker.join(timeout=2)
+        with self._draw_lock:
+            self._send_image_data(self._image_black)
+            self._dotstar.deinit()
+            self._spi.deinit()
 
     def _update_state(self):
         try:

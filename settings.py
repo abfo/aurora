@@ -129,6 +129,16 @@ class Settings(BaseSettings):
         validation_alias="BACKEND_MODEL",
     )
 
+    # GPT-Live delivers output audio just in time, never ahead, so playback holds
+    # this much in reserve to ride out network jitter and brief stalls. Larger is
+    # more robust on a flaky connection; every millisecond is added to the delay
+    # before Aurora is heard. The session-end log line reports underruns to tune by.
+    playback_buffer_ms: int = Field(
+        default=300,
+        description="Jitter buffer for assistant audio, in milliseconds",
+        validation_alias="PLAYBACK_BUFFER_MS",
+    )
+
     # GPT-Live has no end-of-response event, so the session is closed from here
     # after this long with no speech in either direction and nothing left to play.
     # Disabled while cooking, where long silences are expected.
@@ -140,11 +150,11 @@ class Settings(BaseSettings):
 
     # GPT-Live is full duplex and handles interruptions itself, so Aurora streams
     # the mic continuously. On hardware where the speaker bleeds into the mic (no
-    # echo cancellation) that means she can hear herself; set this to stop sending
-    # mic audio while she is speaking. Costs the ability to interrupt her.
+    # echo cancellation) that means she can hear herself; set this to send silence
+    # in place of the mic while she is speaking. Costs the ability to interrupt her.
     mute_input_while_speaking: bool = Field(
         default=False,
-        description="Stop sending mic audio while the assistant is speaking (workaround for speaker/mic echo)",
+        description="Send silence instead of mic audio while the assistant is speaking (workaround for speaker/mic echo)",
         validation_alias="MUTE_INPUT_WHILE_SPEAKING",
     )
 
