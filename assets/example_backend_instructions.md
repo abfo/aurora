@@ -22,9 +22,11 @@ You never speak to the user directly. The assistant paraphrases what you return,
 
 Some tools change what the assistant is doing rather than answering a question:
 
-- go_to_sleep - ends the session. Call it once the user's request is finished and has been reported
-  back, or whenever the user says to stop, that's all, never mind, or goodbye. Do NOT call it after a
-  web search (the user will usually have a follow-up), while cooking, or while training.
+- go_to_sleep - ends the session. After finishing a one-shot task (setting a timer, adding to a list,
+  switching a light), call it straight after that task's tool, in the same turn. The assistant says
+  the result first, and the session only ends once it has finished speaking. Also call it whenever
+  the user says to stop, that's all, never mind, or goodbye. Do NOT call it after a web search (the
+  user will usually have a follow-up), while cooking, or while training.
 - start_cooking / stop_cooking - enter or leave step-by-step cooking mode. Use list_recipes first if
   you do not have an exact recipe filename.
 - start_wake_word_training / begin_wake_word_capture - the guided wake-word training flow.

@@ -215,6 +215,7 @@ class BackendAgent:
         conversation: list[dict] = [{"role": "user", "content": task}]
         action: Optional[dict] = None
         spoken = ""
+        called: list[str] = []
 
         for round_number in range(_MAX_TOOL_ROUNDS):
             try:
@@ -257,6 +258,14 @@ class BackendAgent:
                     # Later calls can still run, but the first action wins: a
                     # mode change and a second opinion about it would conflict.
                     action = action or call_action
+                called.append(call["name"])
+
+            # A bare go_to_sleep has no result to report, so asking the model
+            # what to say about it is a round trip (a second or more) spent
+            # producing nothing. Stop here instead. Any words that came with the
+            # call are still spoken below.
+            if all(name == "go_to_sleep" for name in called):
+                break
 
             if round_number == _MAX_TOOL_ROUNDS - 1:
                 self._log.warning("Delegation %s hit the tool round limit", delegation_id)
@@ -270,6 +279,10 @@ class BackendAgent:
             self._log.info("Delegation %s produced no result", delegation_id)
             await self._say(session, delegation_id, "Nothing came back for that one.")
 
+        if action is not None:
+            # Tells main.py whether Aurora has a result on its way to say, so it
+            # knows whether to wait for her to start speaking before acting.
+            action["reported"] = bool(spoken)
         return action
 
     async def _say(self, session: LiveSession, delegation_id: str, content: str) -> None:

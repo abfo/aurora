@@ -826,12 +826,17 @@ async def _close_when_quiet_loop(session: LiveSession, playback: _Playback,
     change mode) in the same breath as it reports the result, which GPT-Live is
     still turning into speech at that point, so closing on the first quiet
     moment would cut Aurora off before she had said anything at all.
+
+    The first wait is skipped when the backend sent nothing to say (a bare
+    go_to_sleep): no speech is coming, so waiting for it only delays sleep.
+    Anything Aurora is already saying still gets to finish.
     """
     while not outcome:
         await asyncio.sleep(0.2)
 
     waited = 0.0
-    while not playback.speaking and waited < _SPEECH_START_GRACE_SECONDS:
+    reported = (outcome.get("action") or {}).get("reported", True)
+    while reported and not playback.speaking and waited < _SPEECH_START_GRACE_SECONDS:
         await asyncio.sleep(0.2)
         waited += 0.2
 
