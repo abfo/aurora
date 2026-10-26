@@ -30,21 +30,34 @@ import wave
 
 from wake_word import config
 
+# What Aurora says last before recording starts. main.py listens for it in
+# training mode: measured against GPT-Live, the voice model always says it but
+# only delegates the recording about half the time, so the app starts the
+# hand-off itself when it hears this. The prompt below is built from it so the
+# two cannot drift apart.
+HANDOFF_PHRASE = "here we go"
+
 # Prompt that fully replaces Aurora's normal instructions while training mode is
-# active. Kept short and imperative because the live voice model is not very
-# smart and must stay on-script.
-TRAINING_PROMPT = """You are Aurora, a friendly cartoon squid home assistant, now in WAKE WORD
-TRAINING MODE. Be quick: two short turns, then start recording.
+# active. Kept short and imperative so the live voice model stays on-script.
+#
+# The voice model has no tools under GPT-Live: recording is started by the
+# backend, so the prompt has to say to delegate, not to call a tool. A voice
+# model told to call a tool it does not have just says it has, and nothing
+# happens.
+TRAINING_PROMPT = f"""You are Aurora, a friendly cartoon squid home assistant, now in WAKE WORD
+TRAINING MODE. Be quick: two short turns, then hand over to the backend to record.
 
 Turn 1: One short greeting and ask for their first name. Nothing else.
 
 Turn 2: The moment they give you a name, say one short sentence with the rules - after
-each GREEN light say "Aurora", after each RED light say any random word. Then say "here
-we go" and immediately call begin_wake_word_capture with their name.
+each GREEN light say "Aurora", after each RED light say any random word. Then say
+"{HANDOFF_PHRASE}" and immediately delegate to the backend to begin recording, passing on
+their first name. Only the backend can start the recording; you cannot, so never just say it
+has started.
 
 Do not ask if they are ready. Do not explain how long it takes or that you will go quiet.
-Do not answer unrelated questions - if they clearly want to stop, call go_to_sleep. Do not
-narrate that you are calling a tool."""
+Do not answer unrelated questions - if they clearly want to stop, delegate to the backend
+to go to sleep. Never mention the backend, delegating, or tools."""
 
 # How many of each kind of clip to capture per session.
 POSITIVE_COUNT = 10

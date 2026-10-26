@@ -105,6 +105,10 @@ class BraincraftUI(AssistantUIBase):
             self._draw_lock = threading.Lock()
             self._redraw = threading.Event()
             self._closing = False
+            # Set while a training cue owns the screen and LEDs, so a redraw
+            # that was already pending can't land on top of the cue. Cleared by
+            # the next state change, when training is over.
+            self._cue_showing = False
             self._worker = threading.Thread(target=self._draw_loop, name="braincraft-ui", daemon=True)
             self._worker.start()
 
@@ -119,6 +123,7 @@ class BraincraftUI(AssistantUIBase):
         reason: str | None = None,
     ) -> None:
         self._log.info("UI state changed from %s to %s: %s", previous, current, reason)
+        self._cue_showing = False
         self._redraw.set()
 
     def on_timer_text_changed(self, text: str) -> None:
@@ -137,14 +142,18 @@ class BraincraftUI(AssistantUIBase):
             if self._closing:
                 return
             with self._draw_lock:
-                self._update_state()
+                if not self._cue_showing:
+                    self._update_state()
 
     # Wake-word training cues: all LEDs green for positives, red for negatives.
     # These draw synchronously, so the cue is showing by the time the caller
     # starts its lead-in timer; nothing is playing during training capture.
+    # Capture starts straight after a state change, so the worker may still be
+    # about to redraw for it - _cue_showing stops that redraw replacing the cue.
     def show_training_prompt(self, label: str, index: int, total: int) -> None:
         try:
             with self._draw_lock:
+                self._cue_showing = True
                 color = (0, 255, 0) if label == "positives" else (255, 0, 0)
                 self._dotstar[0] = color
                 self._dotstar[1] = color

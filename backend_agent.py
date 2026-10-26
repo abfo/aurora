@@ -43,6 +43,17 @@ _TRANSCRIPT_CHARS = 1200
 
 _BACKEND_TIMEOUT_SECONDS = 30.0
 
+# Tools that end the session with nothing to report: Aurora has already said
+# her piece ("here we go", or a goodbye), and whatever comes next - sleep, the
+# training session, the recording - speaks for itself.
+_SILENT_ACTIONS = {"go_to_sleep", "start_wake_word_training", "begin_wake_word_capture", "stop_cooking"}
+
+# Actions that hand the conversation to a new session or to the recording.
+# Whatever else the delegation did on the way (looking up recipe names, say)
+# is not worth reporting: the next session opens by speaking for itself, and a
+# line said here would only delay it.
+_HANDOVER_ACTIONS = {"cook", "train", "capture"}
+
 # Session modes. The live prompt and the available tools both change with the
 # mode, and because the live prompt is fixed at session.start, switching mode
 # means reconnecting (see main.py).
@@ -106,7 +117,10 @@ _START_COOKING_TOOL = {
 _STOP_COOKING_TOOL = {
     "name": "stop_cooking",
     "type": "function",
-    "description": "Stops the current cooking session.",
+    "description": (
+        "Stops the current cooking session and puts the assistant to sleep. Call this when the "
+        "user is finished cooking or wants to stop, or says that's all, goodbye, or go to sleep."
+    ),
     "parameters": {"type": "object", "properties": {}, "required": []},
 }
 
@@ -178,12 +192,18 @@ class BackendAgent:
         Training mode is deliberately tiny: the guided flow only needs to take a
         name and start recording, and anything else on offer invites the model
         to wander off script.
+
+        Cooking mode has no go_to_sleep. The backend cannot tell it is mid-recipe,
+        and the rule to sleep after a one-shot task meant a timer set while
+        cooking ended the cooking session. stop_cooking is the only way out
+        there, and it sleeps too.
         """
         if self._mode == MODE_TRAINING:
             return [_BEGIN_CAPTURE_TOOL, _SLEEP_TOOL]
 
         schemas = [tool.manifest() for tool in self._tools]
-        schemas.append(_SLEEP_TOOL)
+        if self._mode != MODE_COOKING:
+            schemas.append(_SLEEP_TOOL)
 
         if settings.wake_word_training_enabled:
             schemas.append(_START_TRAINING_TOOL)
@@ -200,12 +220,14 @@ class BackendAgent:
         return tool if tool and tool.is_configured() else None
 
     # -------------------- Delegation --------------------
-    async def handle(self, session: LiveSession, delegation_id: str, transcript: str) -> Optional[dict]:
+    async def handle(self, session: LiveSession, delegation_id: Optional[str], transcript: str) -> Optional[dict]:
         """Run one delegation to completion.
 
         Sends the spoken result back as commentary and returns a conversation
         action for main.py (sleep, cook, train...), or None if the task was
-        purely informational.
+        purely informational. ``delegation_id`` is None when the app started
+        the task itself rather than GPT-Live; updates then go out as general
+        session context.
         """
         task = (
             "This is the conversation so far between the user and Aurora, whose voice you are "
@@ -260,11 +282,15 @@ class BackendAgent:
                     action = action or call_action
                 called.append(call["name"])
 
-            # A bare go_to_sleep has no result to report, so asking the model
-            # what to say about it is a round trip (a second or more) spent
-            # producing nothing. Stop here instead. Any words that came with the
-            # call are still spoken below.
-            if all(name == "go_to_sleep" for name in called):
+            # A bare silent action (go_to_sleep, or a step into or through
+            # training) has no result to report, so asking the model what to
+            # say about it is a round trip (a second or more) spent producing
+            # nothing - or worse, a redundant line that delays what comes next.
+            # Stop here instead. Any words that came with the call are still
+            # spoken below. The same goes for any hand-over to a new session.
+            if all(name in _SILENT_ACTIONS for name in called):
+                break
+            if action and action.get("action") in _HANDOVER_ACTIONS:
                 break
 
             if round_number == _MAX_TOOL_ROUNDS - 1:
@@ -285,20 +311,20 @@ class BackendAgent:
             action["reported"] = bool(spoken)
         return action
 
-    async def _say(self, session: LiveSession, delegation_id: str, content: str) -> None:
+    async def _say(self, session: LiveSession, delegation_id: Optional[str], content: str) -> None:
         try:
             await session.append_commentary(content, delegation_id)
         except Exception:
             self._log.exception("Could not send commentary for delegation %s", delegation_id)
 
-    async def _think(self, session: LiveSession, delegation_id: str, content: str) -> None:
+    async def _think(self, session: LiveSession, delegation_id: Optional[str], content: str) -> None:
         try:
             await session.append_thinking(content, delegation_id)
         except Exception:
             self._log.debug("Could not send thinking for delegation %s", delegation_id)
 
     # -------------------- Tool execution --------------------
-    async def _run_call(self, session: LiveSession, delegation_id: str, call: dict) -> tuple[str, Optional[dict]]:
+    async def _run_call(self, session: LiveSession, delegation_id: Optional[str], call: dict) -> tuple[str, Optional[dict]]:
         """Run one tool call. Returns (output for the model, action for main.py)."""
         name = call["name"]
         arguments = call["arguments"]
@@ -324,7 +350,10 @@ class BackendAgent:
             return await asyncio.to_thread(self._start_cooking, arguments)
 
         if name == "stop_cooking":
-            return "Stopped the cooking session.", {"action": "stop_cooking"}
+            # Leaving cooking ends the session: a fresh normal session nobody
+            # has spoken into would only sit there until the idle timeout.
+            self._analytics.report_event("Sleep")
+            return "Stopped the cooking session.", {"action": "sleep"}
 
         output = await asyncio.to_thread(self._run_plugin, name, arguments)
         return output, None

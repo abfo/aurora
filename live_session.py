@@ -38,6 +38,11 @@ LIVE_SAMPLERATE = 24000
 
 _WS_PING_INTERVAL_SECONDS = 30
 _WS_PING_TIMEOUT_SECONDS = 25
+# How long to wait for the WebSocket closing handshake. By then session.closed
+# has arrived and usage is final, so there is nothing left to wait for - but
+# GPT-Live takes about 2 s to answer the handshake, which delayed every sleep,
+# mode switch and training capture by that much.
+_WS_CLOSE_TIMEOUT_SECONDS = 0.5
 
 _SESSION_START_TIMEOUT_SECONDS = 15
 _SESSION_CLOSE_TIMEOUT_SECONDS = 15
@@ -135,8 +140,13 @@ class LiveSession:
         except Exception:
             pass
 
-    async def append_commentary(self, content: str, delegation_id: str) -> None:
-        """Hand GPT-Live a verified result to say out loud."""
+    async def append_commentary(self, content: str, delegation_id: Optional[str]) -> None:
+        """Hand GPT-Live something to say out loud.
+
+        Usually a delegation's verified result. With ``delegation_id=None`` it
+        is the application speaking up on its own, which is how Aurora opens a
+        session that nobody has spoken into yet.
+        """
         await self._send({
             "type": "session.commentary.append",
             "event_id": _event_id(),
@@ -224,6 +234,7 @@ async def connect_live_session(instructions: str, log: logging.Logger) -> LiveSe
         additional_headers={"Authorization": f"Bearer {settings.openai_api_key}"},
         ping_interval=_WS_PING_INTERVAL_SECONDS,
         ping_timeout=_WS_PING_TIMEOUT_SECONDS,
+        close_timeout=_WS_CLOSE_TIMEOUT_SECONDS,
     )
 
     start_event = {
