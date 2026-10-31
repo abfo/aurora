@@ -1,8 +1,9 @@
 """Guided, in-app collection of wake-word training samples.
 
 This module powers the guided training flow, reached either by asking Aurora to
-"help me train you to recognize my voice" or by pressing the joystick button
-while she is asleep. It holds the dedicated training-mode prompt (swapped into the
+"help me train you to recognize my voice" or, on a build with
+WAKE_WORD_TRAINING_ENABLED set, by pressing the joystick button while she is
+asleep. It holds the dedicated training-mode prompt (swapped into the
 live session so the small model stays tightly on-script), plus the routine
 that records positive ("Aurora") and negative (any other word) clips from the
 already-open mic stream and writes them to disk for later training.
@@ -13,9 +14,9 @@ with ``<speaker>_<uuid>.wav`` filenames. The speaker prefix lets the training
 dataset group train/val splits by voice (see prepare_dataset._speaker_group),
 and the uuid guarantees repeated sessions never overwrite earlier recordings.
 
-When wake-word training is enabled, runtime activations are also captured here
-via :func:`save_activation_clip` into ``<collect_dir>/activations`` (same format)
-to be reviewed later and sorted into positives/ or negatives/.
+Runtime activations are always captured here via :func:`save_activation_clip`
+into ``<collect_dir>/activations`` (same format), whatever the training switch
+says, to be reviewed later and sorted into positives/ or negatives/.
 
 Nothing is uploaded or trained automatically - the files are left on disk to be
 gathered and fed into ``wake_word/scripts/train.py`` manually.

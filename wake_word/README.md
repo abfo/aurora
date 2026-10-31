@@ -73,19 +73,23 @@ python wake_word/scripts/record_samples.py --speaker kate --label hard_negatives
 ```
 
 **Collect samples on the device** - the running assistant can gather recordings on the
-actual Pi mic/room. Set `WAKE_WORD_TRAINING_ENABLED=true`, then start a session either
+actual Pi mic/room. Every wake-word activation is saved as a ~1.2s clip under
+`wake_word/data/collected/activations/` on any build, training enabled or not, so
+real activations accumulate for review without anyone doing anything. For the
+guided flow, set `WAKE_WORD_TRAINING_ENABLED=true`, then start a session either
 way:
 
 - **Press the joystick button** while Aurora is asleep - no wake word needed.
-  (It's the same button that cancels a ringing alarm; what it does depends on
-  whether she is idle or talking.)
+  (It's the same button that cancels a ringing alarm, and that wakes her for an
+  ordinary conversation when training is off; what it does depends on whether
+  she is idle or talking.)
 - Or say *"Aurora, help me train you to recognize my voice."*
 
 Either route lands in the same short flow: Aurora asks your first name, gives you the
 rules in one line, and starts. She then records 10 positives (lights all **green** - say
 *"Aurora"*) and 5 negatives (lights all **red** - say any other word). On Windows
 (`UI=Debug`) there are no lights or joystick, so the console keys stand in (**enter** =
-the button, so cancel or start training; **down arrow** = shut down) and each cue is logged as
+the button, so cancel or activate; **down arrow** = shut down) and each cue is logged as
 `TRAINING: speak ... sample N/M now`. Clips are written to `wake_word/data/collected/positives/` and `.../negatives/` as
 `<name>_<uuid>.wav` (configurable via `WAKE_WORD_COLLECT_DIR`). The `<uuid>` means
 running it again never overwrites earlier clips, so the family can repeat it

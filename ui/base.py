@@ -111,16 +111,17 @@ class AssistantUIBase(ABC):
         """
 
     # -------------------- User controls --------------------
-    def is_train_pressed(self) -> bool:
-        """Return True if the start-training control is currently pressed.
+    def is_activate_pressed(self) -> bool:
+        """Return True if the activate control is currently pressed.
 
-        Only polled while idle (waiting for the wake word) and only when
-        wake-word training is enabled, so it is an optional capability rather
-        than an abstract requirement. Default is never pressed.
+        Only polled while idle (waiting for the wake word), where a press wakes
+        Aurora without the wake word - or starts wake-word training on a build
+        with training enabled. An optional capability rather than an abstract
+        requirement: default is never pressed.
 
         This may report the same physical control as is_cancel_pressed: the two
         are polled in mutually exclusive phases (cancel only during a session or
-        alarm playback, training only while idle), so one button can serve both.
+        alarm playback, activate only while idle), so one button can serve both.
         """
         return False
 

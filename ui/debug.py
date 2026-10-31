@@ -63,10 +63,10 @@ class DebugUI(AssistantUIBase):
         self._log.info("TRAINING: (clip captured)")
 
     # User controls. Enter is one button with two jobs, mirroring the joystick
-    # press on the Braincraft: cancel during playback, start training while
-    # idle. Only one of the two is ever polled at a time, so they can share it.
-    def is_train_pressed(self) -> bool:
-        return self._take("button", "train")
+    # press on the Braincraft: cancel during playback, activate while idle.
+    # Only one of the two is ever polled at a time, so they can share it.
+    def is_activate_pressed(self) -> bool:
+        return self._take("button", "activate")
 
     def is_cancel_pressed(self) -> bool:
         return self._take("button", "cancel")

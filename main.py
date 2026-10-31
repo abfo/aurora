@@ -238,14 +238,19 @@ async def _run_assistant(
             if outcome == "shutdown":
                 log.info("User requested shutdown")
                 break
-            if outcome not in ("woke", "train"):
+            if outcome not in ("woke", "button", "train"):
                 # due_audio or transient error: loop back to play audio / retry.
                 continue
 
-            # "train" skips the wake word entirely and opens the session straight
-            # into training mode; everything downstream is otherwise identical.
+            # "button" and "train" skip the wake word entirely - the latter opens
+            # the session straight into training mode. Everything downstream is
+            # otherwise identical to waking by voice.
             training_mode = outcome == "train"
-            reason = "Training requested" if training_mode else "Wake word detected"
+            reason = {
+                "woke": "Wake word detected",
+                "button": "Button pressed",
+                "train": "Training requested",
+            }[outcome]
             log.info(reason)
             _drain_queue(frame_queue)
             # Show LISTENING immediately on wake so the user has feedback while
@@ -355,38 +360,39 @@ async def _wait_for_wake_word(
         log: logging.Logger) -> str:
     """Consume mic frames and feed the detector until the wake word fires.
 
-    Returns one of: "woke", "train", "shutdown", "due_audio", "error".
+    Returns one of: "woke", "button", "train", "shutdown", "due_audio", "error".
 
-    "train" means the user asked for wake-word training from the UI (the
-    joystick button) rather than by speaking to Aurora.
+    "button" and "train" mean the user pressed the UI button (the joystick
+    button) rather than speaking to Aurora: an ordinary conversation normally,
+    or wake-word training when that is enabled.
     """
     next_timer_update = datetime.now() + timedelta(seconds=1)
     preroll: deque[bytes] = deque(maxlen=_WAKE_PREROLL_FRAMES)
-    # The training button is the same one that cancels a session or an alarm, so
+    # The activate button is the same one that cancels a session or an alarm, so
     # it may well still be held when we arrive here. Start disarmed: a press only
     # counts once the button has been seen released during this idle period.
-    train_armed = False
+    armed = False
     while True:
         try:
             frame = await frame_queue.get()
             preroll.append(frame)
             samples = struct.unpack_from("h" * (len(frame) // 2), frame)
             if detector.process(samples) >= 0:
-                # When training is enabled, save the exact 1.2s window that fired
-                # as a negative-candidate clip (reviewed/sorted later). Guarded so
-                # a disk error never blocks waking. The buffer is already in
-                # memory, so this adds negligible latency before the handoff.
-                if settings.wake_word_training_enabled:
-                    try:
-                        pcm = detector.window_pcm_bytes()
-                        await asyncio.to_thread(
-                            collect.save_activation_clip,
-                            pcm,
-                            settings.wake_word_collect_dir,
-                            log,
-                        )
-                    except Exception as e:
-                        log.exception("Failed to save activation clip: %s", e)
+                # Always save the exact 1.2s window that fired, whatever the
+                # training switch says: every real activation is training data
+                # worth having (reviewed/sorted later). Guarded so a disk error
+                # never blocks waking. The buffer is already in memory, so this
+                # adds negligible latency before the handoff.
+                try:
+                    pcm = detector.window_pcm_bytes()
+                    await asyncio.to_thread(
+                        collect.save_activation_clip,
+                        pcm,
+                        settings.wake_word_collect_dir,
+                        log,
+                    )
+                except Exception as e:
+                    log.exception("Failed to save activation clip: %s", e)
                 # Replay the buffered lead-in (incl. the wake word) so the start
                 # of the utterance reaches the live session uncut. Any frames
                 # already queued are newer than the pre-roll, so re-insert the
@@ -404,19 +410,19 @@ async def _wait_for_wake_word(
                 return "woke"
             if ui.is_shutdown_pressed():
                 return "shutdown"
-            # The joystick button starts wake-word training directly, skipping
-            # the wake word and the spoken request. Gated on the same master
-            # switch as the start_wake_word_training tool so a stray press does
-            # nothing on a normal build.
-            train_pressed = settings.wake_word_training_enabled and ui.is_train_pressed()
-            if not train_pressed:
+            # The joystick button wakes Aurora directly, skipping the wake word
+            # - the way in for anyone who doesn't know it or can't be heard. On
+            # a training build it opens wake-word training instead, since that
+            # flow also needs a way in that doesn't depend on the detector.
+            pressed = ui.is_activate_pressed()
+            if not pressed:
                 # Arm on release. These are undebounced level reads, so without
                 # this a button still held from cancelling an alarm - or from the
                 # press that ended the last capture - would fire straight away.
-                train_armed = True
-            elif train_armed:
-                train_armed = False
-                return "train"
+                armed = True
+            elif armed:
+                armed = False
+                return "train" if settings.wake_word_training_enabled else "button"
             if audio_manager.has_due_audio():
                 return "due_audio"
             if datetime.now() > next_timer_update:
@@ -429,7 +435,11 @@ async def _wait_for_wake_word(
             return "error"
 
 def _normal_plan(agent_instructions: str) -> dict:
-    """Aurora as usual: the full live prompt and every configured tool."""
+    """Aurora as usual: the full live prompt and every configured tool.
+
+    No opening line, whether the wake word or the button opened the session: she
+    waits in silence (on the listening lights) for the user to speak.
+    """
     return {"mode": MODE_NORMAL, "instructions": agent_instructions, "opening": None}
 
 

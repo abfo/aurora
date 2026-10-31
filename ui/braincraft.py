@@ -174,14 +174,14 @@ class BraincraftUI(AssistantUIBase):
         except Exception:
             self._log.exception("clear_training_lights failed")
 
-    # The joystick press doubles as the training button: it cancels during
-    # playback and starts wake-word training while idle. The directions are
+    # The joystick press has two jobs: it cancels during playback and wakes
+    # Aurora (or starts wake-word training) while idle. The directions are
     # unreachable once the Pi is in its case, so this is the only usable input.
-    def is_train_pressed(self) -> bool:
+    def is_activate_pressed(self) -> bool:
         try:
             return not self._joyselect.value
         except Exception:
-            self._log.exception("is_train_pressed check failed")
+            self._log.exception("is_activate_pressed check failed")
             return False
 
     def is_cancel_pressed(self) -> bool:

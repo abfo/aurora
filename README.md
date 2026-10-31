@@ -8,6 +8,8 @@ client delegation mode: GPT-Live listens and speaks, and hands tasks to a backen
 and calls the tools. You need an [OpenAI API Key](https://platform.openai.com/). Wake word detection
 uses a small, fully local model that we train ourselves (no third-party wake word service) - a trained "Aurora" model
 is included, and it's easy to add your own voice recordings and retrain. See [wake_word/README.md](/wake_word/README.md).
+Pressing the button wakes her too, for anyone who doesn't know the wake word or isn't heard, and every
+wake-word activation is saved as a short clip for review so real recordings build up as she is used.
 
 ![Aurora](/assets/aurora.png)
 

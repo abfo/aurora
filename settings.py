@@ -67,20 +67,23 @@ class Settings(BaseSettings):
         validation_alias="WAKE_WORD_THRESHOLD",
     )
 
-    # Folder for guided ("Aurora, help me train you") wake-word recordings.
-    # Clips land in <dir>/positives and <dir>/negatives as <name>_<uuid>.wav.
+    # Folder for wake-word recordings. Guided ("Aurora, help me train you")
+    # clips land in <dir>/positives and <dir>/negatives as <name>_<uuid>.wav;
+    # every runtime activation lands in <dir>/activations, training or not.
     wake_word_collect_dir: str = Field(
         default="wake_word/data/collected",
         description="Folder for guided wake-word training recordings (positives/ and negatives/ subfolders)",
         validation_alias="WAKE_WORD_COLLECT_DIR",
     )
 
-    # Master switch for wake-word training. When false (default): no activation
-    # clips are saved and the guided "help me train you" tool is not offered to
-    # the assistant. See wake_word/README.md / .env.example.
+    # Master switch for guided wake-word training. When false (default): the
+    # guided "help me train you" tool is not offered to the assistant, and the
+    # button wakes Aurora for an ordinary conversation instead of starting a
+    # training session. Activation clips are saved either way.
+    # See wake_word/README.md / .env.example.
     wake_word_training_enabled: bool = Field(
         default=False,
-        description="Enable wake-word training: save activation clips and offer the training tool",
+        description="Enable guided wake-word training: offer the training tool and start it from the button",
         validation_alias="WAKE_WORD_TRAINING_ENABLED",
     )
 
