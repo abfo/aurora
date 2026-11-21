@@ -117,10 +117,10 @@ class Settings(BaseSettings):
         validation_alias="BACKEND_INSTRUCTIONS_PATH",
     )
 
-    # GPT-Live voice model (defaults to 'gpt-live-1')
+    # GPT-Live voice model (defaults to 'gpt-live-1.1')
     live_model: str = Field(
-        default="gpt-live-1",
-        description="GPT-Live voice model to use (e.g., gpt-live-1)",
+        default="gpt-live-1.1",
+        description="GPT-Live voice model to use (e.g., gpt-live-1.1)",
         validation_alias="LIVE_MODEL",
     )
 
